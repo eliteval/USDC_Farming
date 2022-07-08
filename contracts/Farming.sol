@@ -133,9 +133,8 @@ contract Farming is Ownable {
     }
 
     mapping(address => User) public users;
-    
+
     address POLYGON_USDC = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
-  
 
     IToken private iToken;
 
@@ -160,6 +159,10 @@ contract Farming is Ownable {
     }
 
     //@dev Deposit
-    function _deposit(address _addr, uint256 _amount) internal {}
-}
+    function _deposit(address _addr, uint256 _amount) internal {
+        users[_addr].deposits += _amount;
+        users[_addr].deposit_time = block.timestamp;
 
+        total_deposited += _amount;
+    }
+}

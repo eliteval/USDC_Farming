@@ -1,6 +1,6 @@
 
 # Farming Platform
-Users can deposit USDC to this contract and get yeild every month!
+Users can deposit USDC to this contract and get yield every month!
 
 ## Dependencies
 Install these prerequisites to follow along with the tutorial. See free video tutorial or a full explanation of each prerequisite.

@@ -123,20 +123,30 @@ library SafeMath {
 contract Farming is Ownable {
     using SafeMath for uint256;
 
-    struct User {
+    struct NodeType {
+        string name;
+        uint256 deposit_amount;
+        uint256 payout_percent;
+    }
+    mapping(uint256 => NodeType) public node_types;
+
+    struct UserNode {
         //Deposit Accounting
         uint256 deposits;
         uint256 deposit_time;
         //Payout and Roll Accounting
         uint256 payouts;
-        uint256 rolls;
     }
 
-    mapping(address => User) public users;
+    mapping(address => mapping(uint256 => UserNode)) public user_nodes;
 
     address POLYGON_USDC = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
 
     IToken private iToken;
+
+    address public treasury_address;
+    uint256 public treasury_allocation;
+    uint256 ExitTax = 10;
 
     uint256 public total_users = 1; //set initial user - owner
     uint256 public total_deposited;
@@ -144,10 +154,20 @@ contract Farming is Ownable {
 
     constructor() Ownable() {
         iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
+        node_types[0] = NodeType("Starter", 100, 10);
+        node_types[1] = NodeType("Pro", 500, 15);
+        node_types[2] = NodeType("Whale", 1000, 20);
     }
 
-    function deposit(uint256 _amount) external {
+    function deposit(uint256 _node_type_index) external {
+        require(
+            _node_type_index == 0 ||
+                _node_type_index == 1 ||
+                _node_type_index == 2,
+            "Node Type Index should be 0 or 1 or 2"
+        );
         address _addr = msg.sender;
+        uint256 _amount = node_types[_node_type_index].deposit_amount;
 
         //Transfer Token to the contract
         require(
@@ -155,13 +175,17 @@ contract Farming is Ownable {
             "token transfer failed"
         );
 
-        _deposit(_addr, _amount);
+        _deposit(_addr, _node_type_index, _amount);
     }
 
     //@dev Deposit
-    function _deposit(address _addr, uint256 _amount) internal {
-        users[_addr].deposits += _amount;
-        users[_addr].deposit_time = block.timestamp;
+    function _deposit(
+        address _addr,
+        uint256 _node_type_index,
+        uint256 _amount
+    ) internal {
+        user_nodes[_addr][_node_type_index].deposits += _amount;
+        user_nodes[_addr][_node_type_index].deposit_time = block.timestamp;
 
         total_deposited += _amount;
     }

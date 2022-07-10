@@ -2,11 +2,6 @@
 pragma solidity ^0.8.7;
 
 interface IToken {
-    function calculateTransferTaxes(address _from, uint256 _value)
-        external
-        view
-        returns (uint256 adjustedValue, uint256 taxAmount);
-
     function transferFrom(
         address from,
         address to,
@@ -178,7 +173,6 @@ contract Farming is Ownable {
         _deposit(_addr, _node_type_index, _amount);
     }
 
-    //@dev Deposit
     function _deposit(
         address _addr,
         uint256 _node_type_index,
@@ -188,5 +182,32 @@ contract Farming is Ownable {
         user_nodes[_addr][_node_type_index].deposit_time = block.timestamp;
 
         total_deposited += _amount;
+    }
+
+    function claim(uint256 _node_type_index) public {
+        address _addr = msg.sender;
+
+        uint256 to_payout = payoutOf(_addr, _node_type_index);
+
+        require(iToken.transfer(address(msg.sender), to_payout));
+
+        total_withdraw += to_payout;
+    }
+
+    function payoutOf(address _addr, uint256 _node_type_index)
+        public
+        view
+        returns (uint256 payout)
+    {
+        uint256 share = user_nodes[_addr][_node_type_index]
+            .deposits
+            .mul(node_types[_node_type_index].payout_percent * 1e18)
+            .div(100e18)
+            .div(24 hours * 30);
+        payout =
+            share *
+            block.timestamp.safeSub(
+                user_nodes[_addr][_node_type_index].deposit_time
+            );
     }
 }

@@ -126,6 +126,8 @@ contract Farming is Ownable {
     mapping(uint256 => NodeType) public node_types;
 
     struct UserNode {
+        address upline;
+        uint256 direct_bonus;
         //Deposit Accounting
         uint256 deposits;
         uint256 deposit_time;
@@ -140,7 +142,7 @@ contract Farming is Ownable {
     IToken private iToken;
 
     address public treasury_address;
-    uint256 public treasury_allocation;
+    uint256 public treasury_allocation = 35; //35% of deposit will go to treasury
     uint256 ExitTax = 10;
 
     uint256 public total_users = 1; //set initial user - owner
@@ -154,7 +156,7 @@ contract Farming is Ownable {
         node_types[2] = NodeType("Whale", 1000, 20);
     }
 
-    function deposit(uint256 _node_type_index) external {
+    function deposit(uint256 _node_type_index, address _upline) external {
         require(
             _node_type_index == 0 ||
                 _node_type_index == 1 ||
@@ -164,9 +166,23 @@ contract Farming is Ownable {
         address _addr = msg.sender;
         uint256 _amount = node_types[_node_type_index].deposit_amount;
 
+        _setUpline(_addr, _node_type_index, _upline);
+
+        uint256 amount_to_treasury = _amount
+            .mul(treasury_allocation * 1e18)
+            .div(100e18);
+        uint256 amount_to_faucet = _amount.sub(amount_to_treasury);
         //Transfer Token to the contract
         require(
-            iToken.transferFrom(_addr, address(this), _amount),
+            iToken.transferFrom(_addr, address(this), amount_to_faucet),
+            "token transfer failed"
+        );
+        require(
+            iToken.transferFrom(
+                _addr,
+                address(treasury_address),
+                amount_to_treasury
+            ),
             "token transfer failed"
         );
 
@@ -182,6 +198,25 @@ contract Farming is Ownable {
         user_nodes[_addr][_node_type_index].deposit_time = block.timestamp;
 
         total_deposited += _amount;
+        //10% direct commission; only if net positive
+        address _up = user_nodes[_addr][_node_type_index].upline;
+        if (_up != address(0)) {
+            uint256 _bonus = _amount / 20; //5% for referral
+
+            user_nodes[_up][_node_type_index].direct_bonus += _bonus;
+            user_nodes[_up][_node_type_index].deposits += _bonus;
+        }
+    }
+
+    function _setUpline(
+        address _addr,
+        uint256 _node_type_index,
+        address _upline
+    ) internal {
+        if (_upline != _addr && _upline != address(0)) {
+            user_nodes[_addr][_node_type_index].upline = _upline;
+            total_users++;
+        }
     }
 
     function claim(uint256 _node_type_index) public {
@@ -209,5 +244,19 @@ contract Farming is Ownable {
             block.timestamp.safeSub(
                 user_nodes[_addr][_node_type_index].deposit_time
             );
+    }
+
+    //Admin side function
+    function setTokenAddress(address _tokenadd) public {
+        iToken = IToken(_tokenadd);
+    }
+
+    function setTreasuryAddress(address _treasuryadd) public {
+        treasury_address = _treasuryadd;
+    }
+
+    function setTreasuryAllocation(uint256 _treasuryallocation) public {
+        require(_treasuryallocation < 100, "should be less than 100.");
+        treasury_allocation = _treasuryallocation;
     }
 }

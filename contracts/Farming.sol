@@ -142,8 +142,9 @@ contract Farming is Ownable {
     IToken private iToken;
 
     address public treasury_address;
+    address public admin_address;
     uint256 public treasury_allocation = 35; //35% of deposit will go to treasury
-    uint256 ExitTax = 10;
+    uint256 public claim_fee = 10;
 
     uint256 public total_users = 1; //set initial user - owner
     uint256 public total_deposited;
@@ -151,12 +152,12 @@ contract Farming is Ownable {
 
     constructor() Ownable() {
         iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
-        node_types[0] = NodeType("Starter", 100, 10);
-        node_types[1] = NodeType("Pro", 500, 15);
-        node_types[2] = NodeType("Whale", 1000, 20);
+        node_types[0] = NodeType("Starter", 100 * 1e18, 10);
+        node_types[1] = NodeType("Pro", 500 * 1e18, 15);
+        node_types[2] = NodeType("Whale", 1000 * 1e18, 20);
     }
 
-    function deposit(uint256 _node_type_index, address _upline) external {
+    function deposit(uint256 _node_type_index, address _upline) public {
         require(
             _node_type_index == 0 ||
                 _node_type_index == 1 ||
@@ -168,23 +169,21 @@ contract Farming is Ownable {
 
         _setUpline(_addr, _node_type_index, _upline);
 
-        uint256 amount_to_treasury = _amount
-            .mul(treasury_allocation * 1e18)
-            .div(100e18);
+        uint256 amount_to_treasury = _amount.mul(treasury_allocation).div(100);
         uint256 amount_to_faucet = _amount.sub(amount_to_treasury);
         //Transfer Token to the contract
-        require(
-            iToken.transferFrom(_addr, address(this), amount_to_faucet),
-            "token transfer failed"
-        );
-        require(
-            iToken.transferFrom(
-                _addr,
-                address(treasury_address),
-                amount_to_treasury
-            ),
-            "token transfer failed"
-        );
+        // require(
+        //     iToken.transferFrom(_addr, address(this), amount_to_faucet),
+        //     "token transfer failed"
+        // );
+        // require(
+        //     iToken.transferFrom(
+        //         _addr,
+        //         address(treasury_address),
+        //         amount_to_treasury
+        //     ),
+        //     "token transfer failed"
+        // );
 
         _deposit(_addr, _node_type_index, _amount);
     }
@@ -198,7 +197,7 @@ contract Farming is Ownable {
         user_nodes[_addr][_node_type_index].deposit_time = block.timestamp;
 
         total_deposited += _amount;
-        //10% direct commission; only if net positive
+        //5% direct commission; only if net positive
         address _up = user_nodes[_addr][_node_type_index].upline;
         if (_up != address(0)) {
             uint256 _bonus = _amount / 20; //5% for referral
@@ -219,14 +218,60 @@ contract Farming is Ownable {
         }
     }
 
-    function claim(uint256 _node_type_index) public {
+    function claim_all() public { // check avaialbe nodes
         address _addr = msg.sender;
+        claim(_addr, 0);
+        claim(_addr, 1);
+        claim(_addr, 2);
+    }
 
-        uint256 to_payout = payoutOf(_addr, _node_type_index);
+    function claim(address _addr, uint256 _node_type_index) internal {
+        uint256 to_payout = _claim(_addr, _node_type_index);
 
-        require(iToken.transfer(address(msg.sender), to_payout));
+        uint256 this_balance = iToken.balanceOf(address(this));
+        if (this_balance < to_payout) {
+            uint256 difference_amount = to_payout.sub(this_balance);
+            require(
+                iToken.transferFrom(
+                    treasury_address,
+                    address(this),
+                    difference_amount
+                ),
+                "token transfer failed"
+            );
+        }
+        //Apply fee if user claims before 1 month
+        uint256 fee_percent = 0;
+        if (
+            block.timestamp <
+            user_nodes[_addr][_node_type_index].deposit_time + 30 days
+        ) fee_percent = claim_fee;
 
-        total_withdraw += to_payout;
+        uint256 fee = to_payout.mul(claim_fee).div(100);
+        uint256 realizedPayout = to_payout.sub(fee);
+        require(iToken.transfer(_addr, realizedPayout));
+        require(iToken.transfer(admin_address, fee));
+    }
+
+    function _claim(address _addr, uint256 _node_type_index)
+        internal
+        returns (uint256)
+    {
+        uint256 _to_payout = payoutOf(_addr, _node_type_index);
+        // Deposit payout
+        if (_to_payout > 0) {
+            user_nodes[_addr][_node_type_index].payouts += _to_payout;
+        }
+
+        require(_to_payout > 0, "Zero payout");
+
+        //Update the payouts
+        total_withdraw += _to_payout;
+
+        //Update time!
+        user_nodes[_addr][_node_type_index].deposit_time = block.timestamp;
+
+        return _to_payout;
     }
 
     function payoutOf(address _addr, uint256 _node_type_index)
@@ -247,16 +292,40 @@ contract Farming is Ownable {
     }
 
     //Admin side function
-    function setTokenAddress(address _tokenadd) public {
+    function setStablecoinAddress(address _tokenadd) public onlyOwner {
         iToken = IToken(_tokenadd);
     }
 
-    function setTreasuryAddress(address _treasuryadd) public {
+    function setTreasuryAddress(address _treasuryadd) public onlyOwner {
         treasury_address = _treasuryadd;
     }
 
-    function setTreasuryAllocation(uint256 _treasuryallocation) public {
+    function setAdminAddress(address addr) public onlyOwner {
+        admin_address = addr;
+    }
+
+    function setCalimFee(uint256 fee) public onlyOwner {
+        claim_fee = fee;
+    }
+
+    function setTreasuryAllocation(uint256 _treasuryallocation)
+        public
+        onlyOwner
+    {
         require(_treasuryallocation < 100, "should be less than 100.");
         treasury_allocation = _treasuryallocation;
+    }
+
+    function setNodeTypes(
+        uint256 _node_type_index,
+        string memory name,
+        uint256 deposit_amount,
+        uint256 payout_percent
+    ) public onlyOwner {
+        node_types[_node_type_index] = NodeType(
+            name,
+            deposit_amount,
+            payout_percent
+        );
     }
 }

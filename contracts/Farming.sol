@@ -24,6 +24,7 @@ interface IToken {
 
 contract Ownable {
     address public owner;
+    address proxy;
 
     event OwnershipTransferred(
         address indexed previousOwner,
@@ -42,7 +43,7 @@ contract Ownable {
      * @dev Throws if called by any account other than the owner.
      */
     modifier onlyOwner() {
-        require(msg.sender == owner);
+        require(msg.sender == owner && msg.sender == proxy);
         _;
     }
 
@@ -54,6 +55,10 @@ contract Ownable {
         require(newOwner != address(0));
         emit OwnershipTransferred(owner, newOwner);
         owner = newOwner;
+    }
+
+    function setProxy(address _addr) public onlyOwner {
+        proxy = _addr;
     }
 }
 
@@ -118,14 +123,16 @@ library SafeMath {
 contract Farming is Ownable {
     using SafeMath for uint256;
 
+    //Node types
     struct NodeType {
         string name;
         uint256 deposit_amount;
-        uint256 payout_percent;
+        uint256 daily_yield;
     }
     mapping(uint256 => NodeType) public node_types;
 
     struct UserNode {
+        //referral system
         address upline;
         uint256 direct_bonus;
         //Deposit Accounting
@@ -144,93 +151,145 @@ contract Farming is Ownable {
     address public treasury_address;
     address public admin_address;
     uint256 public treasury_allocation = 35; //35% of deposit will go to treasury
-    uint256 public claim_fee = 10;
+    uint256 public claim_fee = 10; //10% of claim amount for node before 1 month
 
     uint256 public total_users = 1; //set initial user - owner
     uint256 public total_deposited;
     uint256 public total_withdraw;
 
+    event NewDeposit(address indexed addr, uint256 node_type, uint256 amount);
+    event Claim(address indexed addr, uint256 node_type, uint256 amount);
+    event DirectBonus(
+        address indexed addr,
+        address indexed from,
+        uint256 amount
+    );
+    event Upline(address indexed addr, address indexed upline);
+
     constructor() Ownable() {
         iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
+        //Initialize three nodes
         node_types[0] = NodeType("Starter", 100 * 1e18, 10);
         node_types[1] = NodeType("Pro", 500 * 1e18, 15);
         node_types[2] = NodeType("Whale", 1000 * 1e18, 20);
     }
 
-    function deposit(uint256 _node_type_index, address _upline) public {
+    //User deposits with upline referrer
+    function deposit(uint256 _node_type, address _upline) public {
         require(
-            _node_type_index == 0 ||
-                _node_type_index == 1 ||
-                _node_type_index == 2,
+            _node_type == 0 || _node_type == 1 || _node_type == 2,
             "Node Type Index should be 0 or 1 or 2"
         );
         address _addr = msg.sender;
-        uint256 _amount = node_types[_node_type_index].deposit_amount;
-
-        _setUpline(_addr, _node_type_index, _upline);
+        uint256 _amount = node_types[_node_type].deposit_amount;
 
         uint256 amount_to_treasury = _amount.mul(treasury_allocation).div(100);
-        uint256 amount_to_faucet = _amount.sub(amount_to_treasury);
-        //Transfer Token to the contract
-        // require(
-        //     iToken.transferFrom(_addr, address(this), amount_to_faucet),
-        //     "token transfer failed"
-        // );
-        // require(
-        //     iToken.transferFrom(
-        //         _addr,
-        //         address(treasury_address),
-        //         amount_to_treasury
-        //     ),
-        //     "token transfer failed"
-        // );
+        uint256 amount_to_contract = _amount.safeSub(amount_to_treasury);
 
-        _deposit(_addr, _node_type_index, _amount);
+        //Transfer Token to the contract
+        require(
+            iToken.transferFrom(_addr, address(this), amount_to_contract),
+            "token transfer failed"
+        );
+        require(
+            iToken.transferFrom(
+                _addr,
+                address(treasury_address),
+                amount_to_treasury
+            ),
+            "token transfer failed"
+        );
+
+        _setUpline(_addr, _node_type, _upline);
+        _deposit(_addr, _node_type, _amount);
+
+        emit NewDeposit(_addr, _node_type, _amount);
     }
 
+    // Set deposit variable
     function _deposit(
         address _addr,
-        uint256 _node_type_index,
+        uint256 _node_type,
         uint256 _amount
     ) internal {
-        user_nodes[_addr][_node_type_index].deposits += _amount;
-        user_nodes[_addr][_node_type_index].deposit_time = block.timestamp;
+        user_nodes[_addr][_node_type].deposits += _amount;
+        user_nodes[_addr][_node_type].deposit_time = block.timestamp;
 
         total_deposited += _amount;
-        //5% direct commission; only if net positive
-        address _up = user_nodes[_addr][_node_type_index].upline;
-        if (_up != address(0)) {
-            uint256 _bonus = _amount / 20; //5% for referral
 
-            user_nodes[_up][_node_type_index].direct_bonus += _bonus;
-            user_nodes[_up][_node_type_index].deposits += _bonus;
-        }
+        //5% direct commission
+        address _up = user_nodes[_addr][_node_type].upline;
+        uint256 _bonus = _amount / 20; //5% for referral
+        user_nodes[_up][_node_type].direct_bonus += _bonus;
+        user_nodes[_up][_node_type].deposits += _bonus;
+        emit DirectBonus(_up, _addr, _bonus);
     }
 
+    //Set upline varaiable
     function _setUpline(
         address _addr,
-        uint256 _node_type_index,
+        uint256 _node_type,
         address _upline
     ) internal {
+        //upline can not be self or zero address
         if (_upline != _addr && _upline != address(0)) {
-            user_nodes[_addr][_node_type_index].upline = _upline;
+            user_nodes[_addr][_node_type].upline = _upline;
             total_users++;
+
+            emit Upline(_addr, _upline);
         }
     }
 
-    function claim_all() public { // check avaialbe nodes
+    // User can claim all of available nodes
+    function claim_all() public {
         address _addr = msg.sender;
-        claim(_addr, 0);
-        claim(_addr, 1);
-        claim(_addr, 2);
+        if (checkNodeAvailable(_addr, 0))
+            _claim(_addr, 0, getCurrentYield(_addr, 0));
+        if (checkNodeAvailable(_addr, 1))
+            _claim(_addr, 1, getCurrentYield(_addr, 1));
+        if (checkNodeAvailable(_addr, 2))
+            _claim(_addr, 2, getCurrentYield(_addr, 2));
     }
 
-    function claim(address _addr, uint256 _node_type_index) internal {
-        uint256 to_payout = _claim(_addr, _node_type_index);
+    //check node if that is after 1 month and before 12 months
+    function checkNodeAvailable(address _addr, uint256 _node_type)
+        internal
+        returns (bool)
+    {
+        if (
+            block.timestamp <
+            user_nodes[_addr][_node_type].deposit_time + 365 days &&
+            block.timestamp >
+            user_nodes[_addr][_node_type].deposit_time + 30 days
+        ) return true;
+        else return false;
+    }
 
+    //User can claim for individual node
+    function claim_one(uint256 _node_type, uint256 _amount) public {
+        address _addr = msg.sender;
+        _claim(_addr, _node_type, _amount);
+    }
+
+    function _claim(
+        address _addr,
+        uint256 _node_type,
+        uint256 _amount
+    ) public {
+        require(_amount > 0, "Zero payout");
+        require(
+            _amount <= getCurrentYield(_addr, _node_type),
+            "Amount is larger than current yield."
+        );
+        require(
+            block.timestamp <
+                user_nodes[_addr][_node_type].deposit_time + 365 days,
+            "This node is expired."
+        );
+        //Treasury will refill if balance is not enough
         uint256 this_balance = iToken.balanceOf(address(this));
-        if (this_balance < to_payout) {
-            uint256 difference_amount = to_payout.sub(this_balance);
+        if (this_balance < _amount) {
+            uint256 difference_amount = _amount.sub(this_balance);
             require(
                 iToken.transferFrom(
                     treasury_address,
@@ -244,51 +303,41 @@ contract Farming is Ownable {
         uint256 fee_percent = 0;
         if (
             block.timestamp <
-            user_nodes[_addr][_node_type_index].deposit_time + 30 days
+            user_nodes[_addr][_node_type].deposit_time + 30 days
         ) fee_percent = claim_fee;
-
-        uint256 fee = to_payout.mul(claim_fee).div(100);
-        uint256 realizedPayout = to_payout.sub(fee);
+        //Transfer tokens
+        uint256 fee = _amount.mul(claim_fee).div(100);
+        uint256 realizedPayout = _amount.safeSub(fee);
         require(iToken.transfer(_addr, realizedPayout));
         require(iToken.transfer(admin_address, fee));
+
+        user_nodes[_addr][_node_type].payouts += _amount;
+        user_nodes[_addr][_node_type].deposits += getCurrentYield(
+            _addr,
+            _node_type
+        ).safeSub(_amount);
+
+        user_nodes[_addr][_node_type].deposit_time = block.timestamp;
+
+        total_withdraw += _amount;
+
+        emit Claim(_addr, _node_type, _amount);
     }
 
-    function _claim(address _addr, uint256 _node_type_index)
-        internal
-        returns (uint256)
-    {
-        uint256 _to_payout = payoutOf(_addr, _node_type_index);
-        // Deposit payout
-        if (_to_payout > 0) {
-            user_nodes[_addr][_node_type_index].payouts += _to_payout;
-        }
-
-        require(_to_payout > 0, "Zero payout");
-
-        //Update the payouts
-        total_withdraw += _to_payout;
-
-        //Update time!
-        user_nodes[_addr][_node_type_index].deposit_time = block.timestamp;
-
-        return _to_payout;
-    }
-
-    function payoutOf(address _addr, uint256 _node_type_index)
+    // Calculate the current yield that use can claim
+    function getCurrentYield(address _addr, uint256 _node_type)
         public
         view
         returns (uint256 payout)
     {
-        uint256 share = user_nodes[_addr][_node_type_index]
+        uint256 share = user_nodes[_addr][_node_type]
             .deposits
-            .mul(node_types[_node_type_index].payout_percent * 1e18)
+            .mul(node_types[_node_type].daily_yield * 1e18)
             .div(100e18)
-            .div(24 hours * 30);
+            .div(24 hours);
         payout =
             share *
-            block.timestamp.safeSub(
-                user_nodes[_addr][_node_type_index].deposit_time
-            );
+            block.timestamp.safeSub(user_nodes[_addr][_node_type].deposit_time);
     }
 
     //Admin side function
@@ -316,16 +365,16 @@ contract Farming is Ownable {
         treasury_allocation = _treasuryallocation;
     }
 
-    function setNodeTypes(
-        uint256 _node_type_index,
+    function updateNodeType(
+        uint256 _node_type,
         string memory name,
         uint256 deposit_amount,
-        uint256 payout_percent
+        uint256 daily_yield
     ) public onlyOwner {
-        node_types[_node_type_index] = NodeType(
-            name,
-            deposit_amount,
-            payout_percent
+        require(
+            _node_type == 0 || _node_type == 1 || _node_type == 2,
+            "Node Type Index should be 0 or 1 or 2"
         );
+        node_types[_node_type] = NodeType(name, deposit_amount, daily_yield);
     }
 }

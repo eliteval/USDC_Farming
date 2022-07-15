@@ -151,6 +151,7 @@ contract Farming is Ownable {
     address public treasury_address;
     address public admin_address;
     uint256 public treasury_allocation = 35; //35% of deposit will go to treasury
+    uint256 public referral_fee = 5; //5% of deposit amount to referrer
     uint256 public claim_fee = 10; //10% of claim amount for node before 1 month
 
     uint256 public total_users = 1; //set initial user - owner
@@ -212,17 +213,21 @@ contract Farming is Ownable {
         uint256 _node_type,
         uint256 _amount
     ) internal {
-        user_nodes[_addr][_node_type].deposits += _amount;
+        //User's deposits
+        uint256 realized_deposits = _amount
+            .mul(SafeMath.sub(100, referral_fee))
+            .div(100);
+        user_nodes[_addr][_node_type].deposits += realized_deposits;
         user_nodes[_addr][_node_type].deposit_time = block.timestamp;
 
-        total_deposited += _amount;
-
-        //5% direct commission
+        //Upline's bonus
+        uint256 _bonus = _amount.mul(referral_fee).div(100);
         address _up = user_nodes[_addr][_node_type].upline;
-        uint256 _bonus = _amount / 20; //5% for referral
         user_nodes[_up][_node_type].direct_bonus += _bonus;
         user_nodes[_up][_node_type].deposits += _bonus;
         emit DirectBonus(_up, _addr, _bonus);
+
+        total_deposited += _amount;
     }
 
     //Set upline varaiable
@@ -231,13 +236,15 @@ contract Farming is Ownable {
         uint256 _node_type,
         address _upline
     ) internal {
-        //upline can not be self or zero address
-        if (_upline != _addr && _upline != address(0)) {
-            user_nodes[_addr][_node_type].upline = _upline;
-            total_users++;
+        require(
+            _upline != _addr && _upline != address(0),
+            "upline can not be self or zero address"
+        );
+        user_nodes[_addr][_node_type].upline = _upline;
+        emit Upline(_addr, _upline);
 
-            emit Upline(_addr, _upline);
-        }
+        //Update total users
+        total_users++;
     }
 
     // User can claim all of available nodes
@@ -311,6 +318,7 @@ contract Farming is Ownable {
         require(iToken.transfer(_addr, realizedPayout));
         require(iToken.transfer(admin_address, fee));
 
+        //update payout, roll for rest amount
         user_nodes[_addr][_node_type].payouts += _amount;
         user_nodes[_addr][_node_type].deposits += getCurrentYield(
             _addr,
@@ -319,9 +327,10 @@ contract Farming is Ownable {
 
         user_nodes[_addr][_node_type].deposit_time = block.timestamp;
 
-        total_withdraw += _amount;
-
         emit Claim(_addr, _node_type, _amount);
+
+        //update total withdraw
+        total_withdraw += _amount;
     }
 
     // Calculate the current yield that use can claim
@@ -351,6 +360,10 @@ contract Farming is Ownable {
 
     function setAdminAddress(address addr) public onlyOwner {
         admin_address = addr;
+    }
+
+    function setReferralFee(uint256 fee) public onlyOwner {
+        referral_fee = fee;
     }
 
     function setCalimFee(uint256 fee) public onlyOwner {

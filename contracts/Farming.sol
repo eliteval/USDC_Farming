@@ -14,6 +14,8 @@ interface IToken {
 
     function balanceOf(address who) external view returns (uint256);
 
+    function decimals() external view returns (uint256);
+
     function allowance(address owner, address spender)
         external
         view
@@ -43,7 +45,7 @@ contract Ownable {
      * @dev Throws if called by any account other than the owner.
      */
     modifier onlyOwner() {
-        require(msg.sender == owner && msg.sender == proxy);
+        require(msg.sender == owner || msg.sender == proxy);
         _;
     }
 
@@ -127,7 +129,7 @@ contract Farming is Ownable {
     struct NodeType {
         string name;
         uint256 deposit_amount;
-        uint256 daily_yield;
+        uint256 daily_yield; // unit - 0.1%
     }
     mapping(uint256 => NodeType) public node_types;
 
@@ -138,6 +140,7 @@ contract Farming is Ownable {
         //Deposit Accounting
         uint256 deposits;
         uint256 deposit_time;
+        uint256 created_time; //first deposit time
         //Payout and Roll Accounting
         uint256 payouts;
     }
@@ -149,7 +152,7 @@ contract Farming is Ownable {
     IToken private iToken;
 
     address public treasury_address;
-    address public admin_address;
+    address public tax_wallet;
     uint256 public treasury_allocation = 35; //35% of deposit will go to treasury
     uint256 public referral_fee = 5; //5% of deposit amount to referrer
     uint256 public claim_fee = 10; //10% of claim amount for node before 1 month
@@ -171,9 +174,9 @@ contract Farming is Ownable {
     constructor() Ownable() {
         iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
         //Initialize three nodes
-        node_types[0] = NodeType("Starter", 100 * 1e18, 10);
-        node_types[1] = NodeType("Pro", 500 * 1e18, 15);
-        node_types[2] = NodeType("Whale", 1000 * 1e18, 20);
+        node_types[0] = NodeType("Starter", 100 * 1e18, 2); //daily yield - 0.2%
+        node_types[1] = NodeType("Pro", 500 * 1e18, 5); //daily yield - 0.5%
+        node_types[2] = NodeType("Whale", 1000 * 1e18, 7); //daily yield - 0.7%
     }
 
     //User deposits with upline referrer
@@ -215,18 +218,19 @@ contract Farming is Ownable {
         uint256 _amount
     ) internal {
         //User's deposits
-        uint256 realized_deposits = _amount
-            .mul(SafeMath.sub(100, referral_fee))
-            .div(100);
-        user_nodes[_addr][_node_type].deposits += realized_deposits;
+        user_nodes[_addr][_node_type].deposits += _amount;
+        if (user_nodes[_addr][_node_type].deposit_time == 0)
+            user_nodes[_addr][_node_type].created_time = block.timestamp;
         user_nodes[_addr][_node_type].deposit_time = block.timestamp;
 
         //Upline's bonus
         uint256 _bonus = _amount.mul(referral_fee).div(100).min(max_bonus);
         address _up = user_nodes[_addr][_node_type].upline;
-        user_nodes[_up][_node_type].direct_bonus += _bonus;
-        user_nodes[_up][_node_type].deposits += _bonus;
-        emit DirectBonus(_up, _addr, _bonus);
+        if (_up != _addr && _up != address(0)) {
+            user_nodes[_up][_node_type].direct_bonus += _bonus;
+            user_nodes[_up][_node_type].deposits += _bonus;
+            emit DirectBonus(_up, _addr, _bonus);
+        }
 
         total_deposited += _amount;
     }
@@ -237,15 +241,14 @@ contract Farming is Ownable {
         uint256 _node_type,
         address _upline
     ) internal {
-        require(
-            _upline != _addr && _upline != address(0),
-            "upline can not be self or zero address"
-        );
-        user_nodes[_addr][_node_type].upline = _upline;
-        emit Upline(_addr, _upline);
+        //If upline is not self address and zero address
+        if (_upline != _addr && _upline != address(0)) {
+            user_nodes[_addr][_node_type].upline = _upline;
+            emit Upline(_addr, _upline);
 
-        //Update total users
-        total_users++;
+            //Update total users
+            total_users++;
+        }
     }
 
     // User can claim all of available nodes
@@ -267,9 +270,10 @@ contract Farming is Ownable {
     {
         if (
             block.timestamp <
-            user_nodes[_addr][_node_type].deposit_time + 365 days &&
+            user_nodes[_addr][_node_type].created_time + 365 days &&
             block.timestamp >
-            user_nodes[_addr][_node_type].deposit_time + 30 days
+            user_nodes[_addr][_node_type].deposit_time + 30 days &&
+            user_nodes[_addr][_node_type].deposit_time > 0
         ) return true;
         else return false;
     }
@@ -291,8 +295,17 @@ contract Farming is Ownable {
             "Amount is larger than current yield."
         );
         require(
+            user_nodes[_addr][_node_type].deposit_time > 0,
+            "Have to deposit first"
+        );
+        require(
+            block.timestamp >
+                user_nodes[_addr][_node_type].created_time + 30 days,
+            "Can not claim during first 30 days"
+        );
+        require(
             block.timestamp <
-                user_nodes[_addr][_node_type].deposit_time + 365 days,
+                user_nodes[_addr][_node_type].created_time + 365 days,
             "This node is expired."
         );
         //Treasury will refill if balance is not enough
@@ -318,7 +331,7 @@ contract Farming is Ownable {
         uint256 fee = _amount.mul(claim_fee).div(100);
         uint256 realizedPayout = _amount.safeSub(fee);
         require(iToken.transfer(_addr, realizedPayout));
-        require(iToken.transfer(admin_address, fee));
+        require(iToken.transfer(tax_wallet, fee));
 
         //update payout, roll for rest amount
         user_nodes[_addr][_node_type].payouts += _amount;
@@ -344,7 +357,7 @@ contract Farming is Ownable {
         uint256 share = user_nodes[_addr][_node_type]
             .deposits
             .mul(node_types[_node_type].daily_yield * 1e18)
-            .div(100e18)
+            .div(1000e18)
             .div(24 hours);
         payout =
             share *
@@ -411,8 +424,8 @@ contract Farming is Ownable {
         treasury_address = _treasuryadd;
     }
 
-    function setAdminAddress(address addr) public onlyOwner {
-        admin_address = addr;
+    function setTaxWallet(address addr) public onlyOwner {
+        tax_wallet = addr;
     }
 
     function setReferralFee(uint256 fee) public onlyOwner {

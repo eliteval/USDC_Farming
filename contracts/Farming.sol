@@ -153,6 +153,7 @@ contract Farming is Ownable {
     uint256 public treasury_allocation = 35; //35% of deposit will go to treasury
     uint256 public referral_fee = 5; //5% of deposit amount to referrer
     uint256 public claim_fee = 10; //10% of claim amount for node before 1 month
+    uint256 public max_bonus = 50 * 1e18; //limit of bonus for upline
 
     uint256 public total_users = 1; //set initial user - owner
     uint256 public total_deposited;
@@ -221,7 +222,7 @@ contract Farming is Ownable {
         user_nodes[_addr][_node_type].deposit_time = block.timestamp;
 
         //Upline's bonus
-        uint256 _bonus = _amount.mul(referral_fee).div(100);
+        uint256 _bonus = _amount.mul(referral_fee).div(100).min(max_bonus);
         address _up = user_nodes[_addr][_node_type].upline;
         user_nodes[_up][_node_type].direct_bonus += _bonus;
         user_nodes[_up][_node_type].deposits += _bonus;
@@ -261,6 +262,7 @@ contract Farming is Ownable {
     //check node if that is after 1 month and before 12 months
     function checkNodeAvailable(address _addr, uint256 _node_type)
         internal
+        view
         returns (bool)
     {
         if (
@@ -347,6 +349,57 @@ contract Farming is Ownable {
         payout =
             share *
             block.timestamp.safeSub(user_nodes[_addr][_node_type].deposit_time);
+    }
+
+    //Get number of nodes user has
+    function getNodesCount(address _addr)
+        public
+        view
+        returns (uint256, bool[] memory)
+    {
+        uint256 count = 0;
+        bool[] memory status = new bool[](3);
+        for (uint256 i = 0; i < 3; i++) {
+            if (user_nodes[_addr][i].deposits > 0) {
+                count++;
+                status[i] = true;
+            } else status[i] = false;
+        }
+        return (count, status);
+    }
+
+    //Get remaining time for claim
+    function getRemainingTimes(address _addr)
+        public
+        view
+        returns (uint256[] memory)
+    {
+        uint256[] memory remainings = new uint256[](3);
+        for (uint256 i = 0; i < 3; i++) {
+            uint256 rr = user_nodes[_addr][i].deposit_time +
+                30 days -
+                block.timestamp;
+            remainings[i] = rr;
+        }
+        return (remainings);
+    }
+
+    //Get User's total deposit
+    function getUserDeposit(address _addr) public view returns (uint256) {
+        uint256 sum = 0;
+        for (uint256 i = 0; i < 3; i++) {
+            sum += user_nodes[_addr][i].deposits;
+        }
+        return sum;
+    }
+
+    //Get User's total withdraw
+    function getUserWithdraw(address _addr) public view returns (uint256) {
+        uint256 sum = 0;
+        for (uint256 i = 0; i < 3; i++) {
+            sum += user_nodes[_addr][i].payouts;
+        }
+        return sum;
     }
 
     //Admin side function

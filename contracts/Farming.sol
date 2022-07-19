@@ -134,12 +134,13 @@ contract Farming is Ownable {
     mapping(uint256 => NodeType) public node_types;
 
     struct UserNode {
+        string name;
         //referral system
         address upline;
         uint256 direct_bonus;
         //Deposit Accounting
         uint256 deposits;
-        uint256 deposit_time;
+        uint256 last_claim_time;
         uint256 created_time; //first deposit time
         //Payout and Roll Accounting
         uint256 payouts;
@@ -154,7 +155,8 @@ contract Farming is Ownable {
     address public treasury_address;
     address public tax_wallet;
     uint256 public treasury_allocation = 35; //35% of deposit will go to treasury
-    uint256 public referral_fee = 5; //5% of deposit amount to referrer
+    uint256 public referral_discount = 5; //5% discount of amount for deposit with referral
+    uint256 public referral_fee = 5; //5% of deposit amount to referrer's bonus
     uint256 public claim_fee = 10; //10% of claim amount for node before 1 month
     uint256 public max_bonus = 50 * 1e18; //limit of bonus for upline
 
@@ -179,19 +181,33 @@ contract Farming is Ownable {
         node_types[2] = NodeType("Whale", 1000 * 1e18, 7); //daily yield - 0.7%
     }
 
-    //User deposits with upline referrer
-    function deposit(uint256 _node_type, address _upline) public {
+    //User deposits with upline referrer, upline can be address(0) or another address
+    function deposit(
+        string memory _name,
+        uint256 _node_type,
+        address _upline
+    ) public {
         require(
             _node_type == 0 || _node_type == 1 || _node_type == 2,
             "Node Type Index should be 0 or 1 or 2"
         );
         address _addr = msg.sender;
-        uint256 _amount = node_types[_node_type].deposit_amount;
+        uint256 deposit_amount = node_types[_node_type].deposit_amount;
 
-        uint256 amount_to_treasury = _amount.mul(treasury_allocation).div(100);
-        uint256 amount_to_contract = _amount.safeSub(amount_to_treasury);
+        uint256 realized_deposit = deposit_amount;
+        //If user has referral upline, he has discount for deposit amount
+        if (_upline != _addr && _upline != address(0)) {
+            uint256 discount = deposit_amount.mul(referral_discount).div(100);
+            realized_deposit = deposit_amount.safeSub(discount);
+        }
 
-        //Transfer Token to the contract
+        //Transfer Token to the contract and treasury
+        uint256 amount_to_treasury = realized_deposit
+            .mul(treasury_allocation)
+            .div(100);
+        uint256 amount_to_contract = realized_deposit.safeSub(
+            amount_to_treasury
+        );
         require(
             iToken.transferFrom(_addr, address(this), amount_to_contract),
             "token transfer failed"
@@ -206,33 +222,37 @@ contract Farming is Ownable {
         );
 
         _setUpline(_addr, _node_type, _upline);
-        _deposit(_addr, _node_type, _amount);
+        _deposit(_name, _addr, _node_type, deposit_amount);
 
-        emit NewDeposit(_addr, _node_type, _amount);
+        emit NewDeposit(_addr, _node_type, deposit_amount);
     }
 
     // Set deposit variable
     function _deposit(
+        string memory _name,
         address _addr,
         uint256 _node_type,
-        uint256 _amount
+        uint256 deposit_amount
     ) internal {
         //User's deposits
-        user_nodes[_addr][_node_type].deposits += _amount;
-        if (user_nodes[_addr][_node_type].deposit_time == 0)
+        user_nodes[_addr][_node_type].name = _name;
+        user_nodes[_addr][_node_type].deposits += deposit_amount;
+        if (user_nodes[_addr][_node_type].last_claim_time == 0)
             user_nodes[_addr][_node_type].created_time = block.timestamp;
-        user_nodes[_addr][_node_type].deposit_time = block.timestamp;
+        user_nodes[_addr][_node_type].last_claim_time = block.timestamp;
 
         //Upline's bonus
-        uint256 _bonus = _amount.mul(referral_fee).div(100).min(max_bonus);
         address _up = user_nodes[_addr][_node_type].upline;
         if (_up != _addr && _up != address(0)) {
+            uint256 _bonus = deposit_amount.mul(referral_fee).div(100).min(
+                max_bonus
+            );
             user_nodes[_up][_node_type].direct_bonus += _bonus;
             user_nodes[_up][_node_type].deposits += _bonus;
             emit DirectBonus(_up, _addr, _bonus);
         }
 
-        total_deposited += _amount;
+        total_deposited += deposit_amount;
     }
 
     //Set upline varaiable
@@ -241,11 +261,12 @@ contract Farming is Ownable {
         uint256 _node_type,
         address _upline
     ) internal {
+        require(_upline != _addr, "Upline can not be self");
+
         //If upline is not self address and zero address
-        if (_upline != _addr && _upline != address(0)) {
+        if (_upline != address(0)) {
             user_nodes[_addr][_node_type].upline = _upline;
             emit Upline(_addr, _upline);
-
             //Update total users
             total_users++;
         }
@@ -272,8 +293,8 @@ contract Farming is Ownable {
             block.timestamp <
             user_nodes[_addr][_node_type].created_time + 365 days &&
             block.timestamp >
-            user_nodes[_addr][_node_type].deposit_time + 30 days &&
-            user_nodes[_addr][_node_type].deposit_time > 0
+            user_nodes[_addr][_node_type].last_claim_time + 30 days &&
+            user_nodes[_addr][_node_type].last_claim_time > 0
         ) return true;
         else return false;
     }
@@ -295,7 +316,7 @@ contract Farming is Ownable {
             "Amount is larger than current yield."
         );
         require(
-            user_nodes[_addr][_node_type].deposit_time > 0,
+            user_nodes[_addr][_node_type].last_claim_time > 0,
             "Have to deposit first"
         );
         require(
@@ -325,7 +346,7 @@ contract Farming is Ownable {
         uint256 fee_percent = 0;
         if (
             block.timestamp <
-            user_nodes[_addr][_node_type].deposit_time + 30 days
+            user_nodes[_addr][_node_type].last_claim_time + 30 days
         ) fee_percent = claim_fee;
         //Transfer tokens
         uint256 fee = _amount.mul(claim_fee).div(100);
@@ -340,7 +361,7 @@ contract Farming is Ownable {
             _node_type
         ).safeSub(_amount);
 
-        user_nodes[_addr][_node_type].deposit_time = block.timestamp;
+        user_nodes[_addr][_node_type].last_claim_time = block.timestamp;
 
         emit Claim(_addr, _node_type, _amount);
 
@@ -361,7 +382,9 @@ contract Farming is Ownable {
             .div(24 hours);
         payout =
             share *
-            block.timestamp.safeSub(user_nodes[_addr][_node_type].deposit_time);
+            block.timestamp.safeSub(
+                user_nodes[_addr][_node_type].last_claim_time
+            );
     }
 
     //Get number of nodes user has
@@ -389,7 +412,7 @@ contract Farming is Ownable {
     {
         uint256[] memory remainings = new uint256[](3);
         for (uint256 i = 0; i < 3; i++) {
-            uint256 rr = user_nodes[_addr][i].deposit_time +
+            uint256 rr = user_nodes[_addr][i].last_claim_time +
                 30 days -
                 block.timestamp;
             remainings[i] = rr;
@@ -426,6 +449,10 @@ contract Farming is Ownable {
 
     function setTaxWallet(address addr) public onlyOwner {
         tax_wallet = addr;
+    }
+
+    function setReferralDiscount(uint256 discount) public onlyOwner {
+        referral_discount = discount;
     }
 
     function setReferralFee(uint256 fee) public onlyOwner {

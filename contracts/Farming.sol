@@ -160,6 +160,10 @@ contract Farming is Ownable {
     uint256 public claim_fee = 10; //10% of claim amount for node before 1 month
     uint256 public max_bonus = 50 * 1e18; //limit of bonus for upline
 
+    uint256 public expiration_period = 365 days; //Node will expire after 365 days from crated time
+    uint256 public no_claim_period = 30 days; //User can not claim during 30 days from created time
+    uint256 public taxed_claim_period = 30 days; //User will claim with fee during 30 days from last claim time
+
     uint256 public total_users = 1; //set initial user - owner
     uint256 public total_deposited;
     uint256 public total_withdraw;
@@ -291,9 +295,12 @@ contract Farming is Ownable {
     {
         if (
             block.timestamp <
-            user_nodes[_addr][_node_type].created_time + 365 days &&
+            user_nodes[_addr][_node_type].created_time + expiration_period &&
             block.timestamp >
-            user_nodes[_addr][_node_type].last_claim_time + 30 days &&
+            user_nodes[_addr][_node_type].created_time + no_claim_period &&
+            block.timestamp >
+            user_nodes[_addr][_node_type].last_claim_time +
+                taxed_claim_period &&
             user_nodes[_addr][_node_type].last_claim_time > 0
         ) return true;
         else return false;
@@ -321,12 +328,12 @@ contract Farming is Ownable {
         );
         require(
             block.timestamp >
-                user_nodes[_addr][_node_type].created_time + 30 days,
-            "Can not claim during first 30 days"
+                user_nodes[_addr][_node_type].created_time + no_claim_period,
+            "Can not claim during no claim period"
         );
         require(
             block.timestamp <
-                user_nodes[_addr][_node_type].created_time + 365 days,
+                user_nodes[_addr][_node_type].created_time + expiration_period,
             "This node is expired."
         );
         //Treasury will refill if balance is not enough
@@ -342,17 +349,17 @@ contract Farming is Ownable {
                 "token transfer failed"
             );
         }
-        //Apply fee if user claims before 1 month
+        //Apply fee during taxed claim period
         uint256 fee_percent = 0;
         if (
             block.timestamp <
-            user_nodes[_addr][_node_type].last_claim_time + 30 days
+            user_nodes[_addr][_node_type].last_claim_time + taxed_claim_period
         ) fee_percent = claim_fee;
         //Transfer tokens
         uint256 fee = _amount.mul(claim_fee).div(100);
         uint256 realizedPayout = _amount.safeSub(fee);
         require(iToken.transfer(_addr, realizedPayout));
-        require(iToken.transfer(tax_wallet, fee));
+        if (fee > 0) require(iToken.transfer(tax_wallet, fee));
 
         //update payout, roll for rest amount
         user_nodes[_addr][_node_type].payouts += _amount;
@@ -404,7 +411,7 @@ contract Farming is Ownable {
         return (count, status);
     }
 
-    //Get remaining time for claim
+    //Get remaining time of taxed claim period
     function getRemainingTimes(address _addr)
         public
         view
@@ -412,10 +419,10 @@ contract Farming is Ownable {
     {
         uint256[] memory remainings = new uint256[](3);
         for (uint256 i = 0; i < 3; i++) {
-            uint256 rr = user_nodes[_addr][i].last_claim_time +
-                30 days -
-                block.timestamp;
-            remainings[i] = rr;
+            remainings[i] = user_nodes[_addr][i]
+                .last_claim_time
+                .add(taxed_claim_period)
+                .safeSub(block.timestamp);
         }
         return (remainings);
     }
@@ -447,6 +454,14 @@ contract Farming is Ownable {
         treasury_address = _treasuryadd;
     }
 
+    function setTreasuryAllocation(uint256 _treasuryallocation)
+        public
+        onlyOwner
+    {
+        require(_treasuryallocation < 100, "should be less than 100.");
+        treasury_allocation = _treasuryallocation;
+    }
+
     function setTaxWallet(address addr) public onlyOwner {
         tax_wallet = addr;
     }
@@ -463,12 +478,16 @@ contract Farming is Ownable {
         claim_fee = fee;
     }
 
-    function setTreasuryAllocation(uint256 _treasuryallocation)
-        public
-        onlyOwner
-    {
-        require(_treasuryallocation < 100, "should be less than 100.");
-        treasury_allocation = _treasuryallocation;
+    function setExpirationPeriod(uint256 value) public onlyOwner {
+        expiration_period = value;
+    }
+
+    function setNoClaimPeriod(uint256 value) public onlyOwner {
+        no_claim_period = value;
+    }
+
+    function setTaxedClaimPeriod(uint256 value) public onlyOwner {
+        taxed_claim_period = value;
     }
 
     function updateNodeType(

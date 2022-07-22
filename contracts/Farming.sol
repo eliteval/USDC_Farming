@@ -130,11 +130,12 @@ contract Farming is Ownable {
         string name;
         uint256 deposit_amount;
         uint256 daily_yield; // unit - 0.1%
+        uint256 renewed_daily_yield; // unit - 0.1%
     }
     mapping(uint256 => NodeType) public node_types;
 
     struct UserNode {
-        string name;
+        bool renewed; //Node's renewed status
         //referral system
         address upline;
         uint256 direct_bonus;
@@ -160,7 +161,7 @@ contract Farming is Ownable {
     uint256 public claim_fee = 10; //10% of claim amount for node before 1 month
     uint256 public max_bonus = 50 * 1e18; //limit of bonus for upline
 
-    uint256 public expiration_period = 365 days; //Node will expire after 365 days from crated time
+    uint256 public expiration_period = 365 days; //Node will expire after 365 days from created time
     uint256 public no_claim_period = 30 days; //User can not claim during 30 days from created time
     uint256 public taxed_claim_period = 30 days; //User will claim with fee during 30 days from last claim time
 
@@ -176,21 +177,18 @@ contract Farming is Ownable {
         uint256 amount
     );
     event Upline(address indexed addr, address indexed upline);
+    event Renew(address indexed addr, uint256 node_type);
 
     constructor() Ownable() {
         iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
         //Initialize three nodes
-        node_types[0] = NodeType("Starter", 100 * 1e18, 2); //daily yield - 0.2%
-        node_types[1] = NodeType("Pro", 500 * 1e18, 5); //daily yield - 0.5%
-        node_types[2] = NodeType("Whale", 1000 * 1e18, 7); //daily yield - 0.7%
+        node_types[0] = NodeType("Starter", 100 * 1e18, 2, 3); //daily yield - 0.2%, renewed daily yield - 0.3%
+        node_types[1] = NodeType("Pro", 500 * 1e18, 5, 7); //daily yield - 0.5%, renewed daily yield - 0.7%
+        node_types[2] = NodeType("Whale", 1000 * 1e18, 7, 10); //daily yield - 0.7%, renewed daily yield - 1%
     }
 
     //User deposits with upline referrer, upline can be address(0) or another address
-    function deposit(
-        string memory _name,
-        uint256 _node_type,
-        address _upline
-    ) public {
+    function deposit(uint256 _node_type, address _upline) public {
         require(
             _node_type == 0 || _node_type == 1 || _node_type == 2,
             "Node Type Index should be 0 or 1 or 2"
@@ -226,21 +224,20 @@ contract Farming is Ownable {
         );
 
         _setUpline(_addr, _node_type, _upline);
-        _deposit(_name, _addr, _node_type, deposit_amount);
+        _deposit(_addr, _node_type, deposit_amount);
 
         emit NewDeposit(_addr, _node_type, deposit_amount);
     }
 
     // Set deposit variable
     function _deposit(
-        string memory _name,
         address _addr,
         uint256 _node_type,
         uint256 deposit_amount
     ) internal {
         //User's deposits
-        user_nodes[_addr][_node_type].name = _name;
         user_nodes[_addr][_node_type].deposits += deposit_amount;
+        //If this is first deposit
         if (user_nodes[_addr][_node_type].last_claim_time == 0)
             user_nodes[_addr][_node_type].created_time = block.timestamp;
         user_nodes[_addr][_node_type].last_claim_time = block.timestamp;
@@ -280,11 +277,11 @@ contract Farming is Ownable {
     function claim_all() public {
         address _addr = msg.sender;
         if (checkNodeAvailable(_addr, 0))
-            _claim(_addr, 0, getCurrentYield(_addr, 0));
+            _claim(_addr, 0, getYieldCalculated(_addr, 0));
         if (checkNodeAvailable(_addr, 1))
-            _claim(_addr, 1, getCurrentYield(_addr, 1));
+            _claim(_addr, 1, getYieldCalculated(_addr, 1));
         if (checkNodeAvailable(_addr, 2))
-            _claim(_addr, 2, getCurrentYield(_addr, 2));
+            _claim(_addr, 2, getYieldCalculated(_addr, 2));
     }
 
     //check node if that is after 1 month and before 12 months
@@ -294,13 +291,17 @@ contract Farming is Ownable {
         returns (bool)
     {
         if (
+            //before expiration Time
             block.timestamp <
             user_nodes[_addr][_node_type].created_time + expiration_period &&
+            //before no cliam period
             block.timestamp >
             user_nodes[_addr][_node_type].created_time + no_claim_period &&
+            //after taxed claim period
             block.timestamp >
             user_nodes[_addr][_node_type].last_claim_time +
                 taxed_claim_period &&
+            //has to deposit
             user_nodes[_addr][_node_type].last_claim_time > 0
         ) return true;
         else return false;
@@ -316,15 +317,15 @@ contract Farming is Ownable {
         address _addr,
         uint256 _node_type,
         uint256 _amount
-    ) public {
+    ) internal {
         require(_amount > 0, "Zero payout");
         require(
-            _amount <= getCurrentYield(_addr, _node_type),
+            _amount <= getYieldCalculated(_addr, _node_type),
             "Amount is larger than current yield."
         );
         require(
             user_nodes[_addr][_node_type].last_claim_time > 0,
-            "Have to deposit first"
+            "Node is not created"
         );
         require(
             block.timestamp >
@@ -356,18 +357,17 @@ contract Farming is Ownable {
             user_nodes[_addr][_node_type].last_claim_time + taxed_claim_period
         ) fee_percent = claim_fee;
         //Transfer tokens
-        uint256 fee = _amount.mul(claim_fee).div(100);
+        uint256 fee = _amount.mul(fee_percent).div(100);
         uint256 realizedPayout = _amount.safeSub(fee);
-        require(iToken.transfer(_addr, realizedPayout));
-        if (fee > 0) require(iToken.transfer(tax_wallet, fee));
+        require(
+            iToken.transfer(_addr, realizedPayout),
+            "token transfer failed"
+        );
+        if (fee > 0)
+            require(iToken.transfer(tax_wallet, fee), "token transfer failed");
 
         //update payout, roll for rest amount
         user_nodes[_addr][_node_type].payouts += _amount;
-        user_nodes[_addr][_node_type].deposits += getCurrentYield(
-            _addr,
-            _node_type
-        ).safeSub(_amount);
-
         user_nodes[_addr][_node_type].last_claim_time = block.timestamp;
 
         emit Claim(_addr, _node_type, _amount);
@@ -376,22 +376,63 @@ contract Farming is Ownable {
         total_withdraw += _amount;
     }
 
+    //Renew the expired node
+    function renew(uint256 _node_type) public {
+        address _addr = msg.sender;
+        _renew(_addr, _node_type);
+    }
+
+    function _renew(address _addr, uint256 _node_type) internal {
+        require(
+            user_nodes[_addr][_node_type].last_claim_time > 0,
+            "Node is not created"
+        );
+        require(
+            !user_nodes[_addr][_node_type].renewed,
+            "Node is already renewed"
+        );
+        require(
+            block.timestamp >
+                user_nodes[_addr][_node_type].created_time + expiration_period,
+            "Node is not expired yet."
+        );
+
+        user_nodes[_addr][_node_type].created_time = block.timestamp;
+        user_nodes[_addr][_node_type].last_claim_time = block.timestamp;
+        user_nodes[_addr][_node_type].renewed = true;
+
+        emit Renew(_addr, _node_type);
+    }
+
     // Calculate the current yield that use can claim
-    function getCurrentYield(address _addr, uint256 _node_type)
+    function getYieldCalculated(address _addr, uint256 _node_type)
         public
         view
         returns (uint256 payout)
     {
+        uint256 node_daily_yield = getDailyYield(_addr, _node_type);
         uint256 share = user_nodes[_addr][_node_type]
             .deposits
-            .mul(node_types[_node_type].daily_yield * 1e18)
-            .div(1000e18)
+            .mul(node_daily_yield)
+            .div(1000)
             .div(24 hours);
         payout =
             share *
             block.timestamp.safeSub(
                 user_nodes[_addr][_node_type].last_claim_time
             );
+    }
+
+    //Get the current daily yield of node
+    function getDailyYield(address _addr, uint256 _node_type)
+        public
+        view
+        returns (uint256)
+    {
+        uint256 node_daily_yield = user_nodes[_addr][_node_type].renewed
+            ? node_types[_node_type].renewed_daily_yield
+            : node_types[_node_type].daily_yield;
+        return node_daily_yield;
     }
 
     //Get number of nodes user has
@@ -490,16 +531,22 @@ contract Farming is Ownable {
         taxed_claim_period = value;
     }
 
-    function updateNodeType(
+    function setNodeType(
         uint256 _node_type,
         string memory name,
         uint256 deposit_amount,
-        uint256 daily_yield
+        uint256 daily_yield,
+        uint256 renewed_daily_yield
     ) public onlyOwner {
         require(
             _node_type == 0 || _node_type == 1 || _node_type == 2,
             "Node Type Index should be 0 or 1 or 2"
         );
-        node_types[_node_type] = NodeType(name, deposit_amount, daily_yield);
+        node_types[_node_type] = NodeType(
+            name,
+            deposit_amount,
+            daily_yield,
+            renewed_daily_yield
+        );
     }
 }

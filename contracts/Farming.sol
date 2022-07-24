@@ -129,20 +129,21 @@ contract Farming is Ownable {
     struct NodeType {
         string name;
         uint256 deposit_amount;
-        uint256 daily_yield; // unit - 0.1%
-        uint256 renewed_daily_yield; // unit - 0.1%
+        uint256 daily_yield; // unit - 0.01%
+        uint256 yield_increase_percent; // Percentage of increase of daily yield every year
     }
     mapping(uint256 => NodeType) public node_types;
 
     struct UserNode {
-        bool renewed; //Node's renewed status
+        //Node's renewed count, if 0, then 1st year. if 1, then 2nd year. if 2, then 3rd year
+        uint256 renewed;
         //referral system
         address upline;
         uint256 direct_bonus;
         //Deposit Accounting
         uint256 deposits;
         uint256 last_claim_time;
-        uint256 created_time; //first deposit time
+        uint256 created_time; //time for creat and renew
         //Payout and Roll Accounting
         uint256 payouts;
     }
@@ -164,6 +165,7 @@ contract Farming is Ownable {
     uint256 public expiration_period = 365 days; //Node will expire after 365 days from created time
     uint256 public no_claim_period = 30 days; //User can not claim during 30 days from created time
     uint256 public taxed_claim_period = 30 days; //User will claim with fee during 30 days from last claim time
+    uint256 constant MAX_NEWED_COUNT = 2; //User can renew node 2 times so use it for 3 years
 
     uint256 public total_users = 1; //set initial user - owner
     uint256 public total_deposited;
@@ -182,9 +184,9 @@ contract Farming is Ownable {
     constructor() Ownable() {
         iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
         //Initialize three nodes
-        node_types[0] = NodeType("Starter", 100 * 1e18, 2, 3); //daily yield - 0.2%, renewed daily yield - 0.3%
-        node_types[1] = NodeType("Pro", 500 * 1e18, 5, 7); //daily yield - 0.5%, renewed daily yield - 0.7%
-        node_types[2] = NodeType("Whale", 1000 * 1e18, 7, 10); //daily yield - 0.7%, renewed daily yield - 1%
+        node_types[0] = NodeType("Starter", 100 * 1e18, 20, 30); //daily yield - 0.2%, increase 30% every year
+        node_types[1] = NodeType("Pro", 500 * 1e18, 50, 30); //daily yield - 0.5%, increase 30% every year
+        node_types[2] = NodeType("Whale", 1000 * 1e18, 70, 30); //daily yield - 0.7%, increase 30% every year
     }
 
     //User deposits with upline referrer, upline can be address(0) or another address
@@ -301,8 +303,8 @@ contract Farming is Ownable {
             block.timestamp >
             user_nodes[_addr][_node_type].last_claim_time +
                 taxed_claim_period &&
-            //has to deposit
-            user_nodes[_addr][_node_type].last_claim_time > 0
+            //has to be created
+            user_nodes[_addr][_node_type].created_time > 0
         ) return true;
         else return false;
     }
@@ -324,7 +326,7 @@ contract Farming is Ownable {
             "Amount is larger than current yield."
         );
         require(
-            user_nodes[_addr][_node_type].last_claim_time > 0,
+            user_nodes[_addr][_node_type].created_time > 0,
             "Node is not created"
         );
         require(
@@ -337,19 +339,11 @@ contract Farming is Ownable {
                 user_nodes[_addr][_node_type].created_time + expiration_period,
             "This node is expired."
         );
-        //Treasury will refill if balance is not enough
-        uint256 this_balance = iToken.balanceOf(address(this));
-        if (this_balance < _amount) {
-            uint256 difference_amount = _amount.sub(this_balance);
-            require(
-                iToken.transferFrom(
-                    treasury_address,
-                    address(this),
-                    difference_amount
-                ),
-                "token transfer failed"
-            );
-        }
+        require(
+            iToken.balanceOf(address(this)) > _amount,
+            "Balance is not enough"
+        );
+
         //Apply fee during taxed claim period
         uint256 fee_percent = 0;
         if (
@@ -384,12 +378,12 @@ contract Farming is Ownable {
 
     function _renew(address _addr, uint256 _node_type) internal {
         require(
-            user_nodes[_addr][_node_type].last_claim_time > 0,
+            user_nodes[_addr][_node_type].created_time > 0,
             "Node is not created"
         );
         require(
-            !user_nodes[_addr][_node_type].renewed,
-            "Node is already renewed"
+            !(user_nodes[_addr][_node_type].renewed + 1 > MAX_NEWED_COUNT), // Can not over MAX_NEWED_COUNT
+            "Can not renew any more"
         );
         require(
             block.timestamp >
@@ -397,9 +391,19 @@ contract Farming is Ownable {
             "Node is not expired yet."
         );
 
+        //User will pay fee for renewal, same amount as deposit
+        require(
+            iToken.transferFrom(
+                _addr,
+                address(this),
+                node_types[_node_type].deposit_amount
+            ),
+            "token transfer failed"
+        );
+
         user_nodes[_addr][_node_type].created_time = block.timestamp;
         user_nodes[_addr][_node_type].last_claim_time = block.timestamp;
-        user_nodes[_addr][_node_type].renewed = true;
+        user_nodes[_addr][_node_type].renewed++;
 
         emit Renew(_addr, _node_type);
     }
@@ -423,16 +427,20 @@ contract Farming is Ownable {
             );
     }
 
-    //Get the current daily yield of node
+    //Get the current year's daily yield of node
     function getDailyYield(address _addr, uint256 _node_type)
         public
         view
         returns (uint256)
     {
-        uint256 node_daily_yield = user_nodes[_addr][_node_type].renewed
-            ? node_types[_node_type].renewed_daily_yield
-            : node_types[_node_type].daily_yield;
-        return node_daily_yield;
+        /*
+          current year's yield = daily yield * (increase ^ renewed count)
+        */
+        uint256 a = node_types[_node_type].daily_yield;
+        uint256 b = node_types[_node_type].yield_increase_percent;
+        uint256 y = user_nodes[_addr][_node_type].renewed;
+
+        return a.mul(SafeMath.add(100, b)**y).div(100**y);
     }
 
     //Get number of nodes user has
@@ -536,7 +544,7 @@ contract Farming is Ownable {
         string memory name,
         uint256 deposit_amount,
         uint256 daily_yield,
-        uint256 renewed_daily_yield
+        uint256 yield_increase_percent
     ) public onlyOwner {
         require(
             _node_type == 0 || _node_type == 1 || _node_type == 2,
@@ -546,7 +554,13 @@ contract Farming is Ownable {
             name,
             deposit_amount,
             daily_yield,
-            renewed_daily_yield
+            yield_increase_percent
         );
+    }
+
+    function withdraw(uint256 amount) public onlyOwner {
+        uint256 balance = iToken.balanceOf(address(this));
+        require(amount <= balance, "Amount is bigger than balance.");
+        require(iToken.transfer(msg.sender, amount), "token transfer failed");
     }
 }

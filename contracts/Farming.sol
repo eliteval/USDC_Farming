@@ -135,11 +135,11 @@ contract Farming is Ownable {
     mapping(uint256 => NodeType) public node_types;
 
     struct UserNode {
+        uint256 node_type; // 0 - starter, 1 - pro, 2 - whale
         //Node's renewed count, if 0, then 1st year. if 1, then 2nd year. if 2, then 3rd year
         uint256 renewed;
         //referral system
         address upline;
-        uint256 direct_bonus;
         //Deposit Accounting
         uint256 deposits;
         uint256 last_claim_time;
@@ -149,6 +149,7 @@ contract Farming is Ownable {
     }
 
     mapping(address => mapping(uint256 => UserNode)) public user_nodes;
+    mapping(address => uint256[]) public user_nodes_timestamps;
 
     address POLYGON_USDC = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
 
@@ -171,15 +172,19 @@ contract Farming is Ownable {
     uint256 public total_deposited;
     uint256 public total_withdraw;
 
-    event NewDeposit(address indexed addr, uint256 node_type, uint256 amount);
-    event Claim(address indexed addr, uint256 node_type, uint256 amount);
+    event NewDeposit(address indexed addr, uint256 timestamp, uint256 amount);
+    event Claim(address indexed addr, uint256 timestamp, uint256 amount);
     event DirectBonus(
         address indexed addr,
         address indexed from,
         uint256 amount
     );
-    event Upline(address indexed addr, address indexed upline);
-    event Renew(address indexed addr, uint256 node_type);
+    event Upline(
+        address indexed addr,
+        address indexed upline,
+        uint256 timestamp
+    );
+    event Renew(address indexed addr, uint256 timestamp);
 
     constructor() Ownable() {
         iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
@@ -190,27 +195,48 @@ contract Farming is Ownable {
     }
 
     //User deposits with upline referrer, upline can be address(0) or another address
-    function deposit(uint256 _node_type, address _upline) public {
+    function createNode(uint256 _node_type, address _upline)
+        public
+        returns (
+            uint256,
+            uint256,
+            uint256,
+            uint256
+        )
+    {
         require(
             _node_type == 0 || _node_type == 1 || _node_type == 2,
             "Node Type Index should be 0 or 1 or 2"
         );
+
         address _addr = msg.sender;
+        require(
+            !_existsNodeWithCreatime(_addr, block.timestamp),
+            "You have already a node with the current timestamp!"
+        );
+
+        require(_upline != _addr, "Upline can not be self");
+
+        uint256 _timestamp = block.timestamp;
+
         uint256 deposit_amount = node_types[_node_type].deposit_amount;
 
         uint256 realized_deposit = deposit_amount;
+        uint256 amount_to_referrer;
         //If user has referral upline, he has discount for deposit amount
-        if (_upline != _addr && _upline != address(0)) {
+        if (_upline != address(0)) {
             uint256 discount = deposit_amount.mul(referral_discount).div(100);
             realized_deposit = deposit_amount.safeSub(discount);
+
+            amount_to_referrer = deposit_amount.mul(referral_fee).div(100);
         }
 
-        //Transfer Token to the contract and treasury
-        uint256 amount_to_treasury = realized_deposit
+        //Transfer Token to the treasury, contract and referrer
+        uint256 amount_to_treasury = deposit_amount
             .mul(treasury_allocation)
             .div(100);
         uint256 amount_to_contract = realized_deposit.safeSub(
-            amount_to_treasury
+            amount_to_treasury.add(amount_to_referrer)
         );
         require(
             iToken.transferFrom(_addr, address(this), amount_to_contract),
@@ -224,198 +250,300 @@ contract Farming is Ownable {
             ),
             "token transfer failed"
         );
+        if (amount_to_referrer > 0)
+            require(
+                iToken.transferFrom(
+                    _addr,
+                    address(treasury_address),
+                    amount_to_treasury
+                ),
+                "token transfer failed"
+            );
 
-        _setUpline(_addr, _node_type, _upline);
-        _deposit(_addr, _node_type, deposit_amount);
+        _create(_addr, _timestamp, _node_type, _upline);
 
-        emit NewDeposit(_addr, _node_type, deposit_amount);
+        return (
+            realized_deposit,
+            amount_to_treasury,
+            amount_to_contract,
+            amount_to_referrer
+        );
     }
 
     // Set deposit variable
-    function _deposit(
+    function _create(
         address _addr,
-        uint256 _node_type,
-        uint256 deposit_amount
-    ) internal {
-        //User's deposits
-        user_nodes[_addr][_node_type].deposits += deposit_amount;
-        //If this is first deposit
-        if (user_nodes[_addr][_node_type].last_claim_time == 0)
-            user_nodes[_addr][_node_type].created_time = block.timestamp;
-        user_nodes[_addr][_node_type].last_claim_time = block.timestamp;
-
-        //Upline's bonus
-        address _up = user_nodes[_addr][_node_type].upline;
-        if (_up != _addr && _up != address(0)) {
-            uint256 _bonus = deposit_amount.mul(referral_fee).div(100).min(
-                max_bonus
-            );
-            user_nodes[_up][_node_type].direct_bonus += _bonus;
-            user_nodes[_up][_node_type].deposits += _bonus;
-            emit DirectBonus(_up, _addr, _bonus);
-        }
-
-        total_deposited += deposit_amount;
-    }
-
-    //Set upline varaiable
-    function _setUpline(
-        address _addr,
+        uint256 _timestamp,
         uint256 _node_type,
         address _upline
-    ) internal {
-        require(_upline != _addr, "Upline can not be self");
+    ) private {
+        //User's deposits
+        uint256 deposit_amount = node_types[_node_type].deposit_amount;
+        user_nodes[_addr][_timestamp].node_type = _node_type;
+        user_nodes[_addr][_timestamp].deposits = deposit_amount;
+        user_nodes[_addr][_timestamp].created_time = block.timestamp;
+        user_nodes[_addr][_timestamp].last_claim_time = block.timestamp;
 
-        //If upline is not self address and zero address
+        user_nodes_timestamps[_addr].push(_timestamp);
+
+        emit NewDeposit(_addr, _timestamp, deposit_amount);
+
+        total_deposited += deposit_amount;
+
+        //If upline
         if (_upline != address(0)) {
-            user_nodes[_addr][_node_type].upline = _upline;
-            emit Upline(_addr, _upline);
+            user_nodes[_addr][_timestamp].upline = _upline;
+            emit Upline(_addr, _upline, _timestamp);
             //Update total users
             total_users++;
         }
     }
 
-    // User can claim all of available nodes
-    function claim_all() public {
-        address _addr = msg.sender;
-        if (checkNodeAvailable(_addr, 0))
-            _claim(_addr, 0, getYieldCalculated(_addr, 0));
-        if (checkNodeAvailable(_addr, 1))
-            _claim(_addr, 1, getYieldCalculated(_addr, 1));
-        if (checkNodeAvailable(_addr, 2))
-            _claim(_addr, 2, getYieldCalculated(_addr, 2));
+    //Check if node already exists
+    function _existsNodeWithCreatime(address _addr, uint256 _creationTime)
+        private
+        view
+        returns (bool)
+    {
+        uint256 numberOfNodes = user_nodes_timestamps[_addr].length;
+
+        if (numberOfNodes == 0) return false;
+
+        if (user_nodes_timestamps[_addr][numberOfNodes - 1] >= _creationTime)
+            return true;
+
+        return false;
     }
 
-    //check node if that is after 1 month and before 12 months
-    function checkNodeAvailable(address _addr, uint256 _node_type)
-        internal
+    // User can claim all available nodes
+    function claimNodesAll() public returns (uint256 total_claimed) {
+        address _addr = msg.sender;
+
+        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
+            uint256 _timestamp = user_nodes_timestamps[_addr][i];
+            if (checkNodeAvailability(_addr, _timestamp)) {
+                uint256 _amount = getYieldCalculated(_addr, _timestamp);
+
+                (, uint256 realized_payout) = _calculate_payout(
+                    _addr,
+                    _timestamp,
+                    _amount
+                );
+                total_claimed += realized_payout;
+
+                _claim(_addr, _timestamp, _amount);
+            }
+        }
+
+        require(
+            iToken.balanceOf(address(this)) > total_claimed,
+            "Contract balance is not enough"
+        );
+
+        //transfer token
+        require(
+            iToken.transfer(_addr, total_claimed),
+            "token transfer failed"
+        );
+    }
+
+    // User can claim available nodes for node type
+    function claimNodesForType(uint256 _node_type)
+        public
+        returns (uint256 total_claimed)
+    {
+        address _addr = msg.sender;
+
+        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
+            uint256 _timestamp = user_nodes_timestamps[_addr][i];
+            uint256 node_type = user_nodes[_addr][_timestamp].node_type;
+            if (
+                node_type == _node_type &&
+                checkNodeAvailability(_addr, _timestamp)
+            ) {
+                uint256 _amount = getYieldCalculated(_addr, _timestamp);
+
+                (, uint256 realized_payout) = _calculate_payout(
+                    _addr,
+                    _timestamp,
+                    _amount
+                );
+                total_claimed += realized_payout;
+
+                _claim(_addr, _timestamp, _amount);
+            }
+        }
+
+        require(
+            iToken.balanceOf(address(this)) > total_claimed,
+            "Contract balance is not enough"
+        );
+
+        //transfer token
+        require(
+            iToken.transfer(_addr, total_claimed),
+            "token transfer failed"
+        );
+    }
+
+    //check node if that is after no claim period, after taxed period and before expiration
+    function checkNodeAvailability(address _addr, uint256 _timestamp)
+        public
         view
         returns (bool)
     {
         if (
             //before expiration Time
             block.timestamp <
-            user_nodes[_addr][_node_type].created_time + expiration_period &&
+            user_nodes[_addr][_timestamp].created_time + expiration_period &&
             //before no cliam period
             block.timestamp >
-            user_nodes[_addr][_node_type].created_time + no_claim_period &&
+            user_nodes[_addr][_timestamp].created_time + no_claim_period &&
             //after taxed claim period
             block.timestamp >
-            user_nodes[_addr][_node_type].last_claim_time +
+            user_nodes[_addr][_timestamp].last_claim_time +
                 taxed_claim_period &&
             //has to be created
-            user_nodes[_addr][_node_type].created_time > 0
+            user_nodes[_addr][_timestamp].created_time > 0
         ) return true;
         else return false;
     }
 
-    //User can claim for individual node
-    function claim_one(uint256 _node_type, uint256 _amount) public {
+    //User can claim for individual node even if in taxed period
+    function claimOne(uint256 _timestamp, uint256 _amount)
+        public
+        returns (uint256, uint256)
+    {
         address _addr = msg.sender;
-        _claim(_addr, _node_type, _amount);
-    }
-
-    function _claim(
-        address _addr,
-        uint256 _node_type,
-        uint256 _amount
-    ) internal {
-        require(_amount > 0, "Zero payout");
+        UserNode memory user_node = user_nodes[_addr][_timestamp];
+        //check node
+        require(user_node.created_time > 0, "Node is not created");
         require(
-            _amount <= getYieldCalculated(_addr, _node_type),
-            "Amount is larger than current yield."
-        );
-        require(
-            user_nodes[_addr][_node_type].created_time > 0,
-            "Node is not created"
-        );
-        require(
-            block.timestamp >
-                user_nodes[_addr][_node_type].created_time + no_claim_period,
+            block.timestamp > user_node.created_time + no_claim_period,
             "Can not claim during no claim period"
         );
         require(
-            block.timestamp <
-                user_nodes[_addr][_node_type].created_time + expiration_period,
+            block.timestamp < user_node.created_time + expiration_period,
             "This node is expired."
+        );
+        //check amount, balance
+        require(_amount > 0, "Zero payout");
+        require(
+            _amount <= getYieldCalculated(_addr, _timestamp),
+            "Amount is larger than current yield."
         );
         require(
             iToken.balanceOf(address(this)) > _amount,
-            "Balance is not enough"
+            "Contract balance is not enough"
         );
 
-        //Apply fee during taxed claim period
-        uint256 fee_percent = 0;
-        if (
-            block.timestamp <
-            user_nodes[_addr][_node_type].last_claim_time + taxed_claim_period
-        ) fee_percent = claim_fee;
-        //Transfer tokens
-        uint256 fee = _amount.mul(fee_percent).div(100);
-        uint256 realizedPayout = _amount.safeSub(fee);
+        //transfer token
+        (uint256 fee, uint256 realized_payout) = _calculate_payout(
+            _addr,
+            _timestamp,
+            _amount
+        );
         require(
-            iToken.transfer(_addr, realizedPayout),
+            iToken.transfer(_addr, realized_payout),
             "token transfer failed"
         );
         if (fee > 0)
             require(iToken.transfer(tax_wallet, fee), "token transfer failed");
 
-        //update payout, roll for rest amount
-        user_nodes[_addr][_node_type].payouts += _amount;
-        user_nodes[_addr][_node_type].last_claim_time = block.timestamp;
+        _claim(_addr, _timestamp, _amount);
+        return (fee, realized_payout);
+    }
 
-        emit Claim(_addr, _node_type, _amount);
+    function _claim(
+        address _addr,
+        uint256 _timestamp,
+        uint256 _amount
+    ) private {
+        user_nodes[_addr][_timestamp].payouts += _amount;
+        user_nodes[_addr][_timestamp].last_claim_time = block.timestamp;
+
+        emit Claim(_addr, _timestamp, _amount);
 
         //update total withdraw
         total_withdraw += _amount;
     }
 
-    //Renew the expired node
-    function renew(uint256 _node_type) public {
-        address _addr = msg.sender;
-        _renew(_addr, _node_type);
+    function _calculate_payout(
+        address _addr,
+        uint256 _timestamp,
+        uint256 _amount
+    ) private view returns (uint256 fee, uint256 realizedPayout) {
+        //Apply fee during taxed claim period
+        uint256 fee_percent = 0;
+        if (getRemainingTimes(_addr, _timestamp) > 0) fee_percent = claim_fee;
+
+        //Transfer tokens
+        fee = _amount.mul(fee_percent).div(100);
+        realizedPayout = _amount.safeSub(fee);
     }
 
-    function _renew(address _addr, uint256 _node_type) internal {
+    //Renew the expired node
+    function renew(uint256 _timestamp)
+        public
+        returns (
+            uint256,
+            uint256,
+            uint256
+        )
+    {
+        address _addr = msg.sender;
+        UserNode memory user_node = user_nodes[_addr][_timestamp];
+
+        require(user_node.created_time > 0, "Node is not created");
         require(
-            user_nodes[_addr][_node_type].created_time > 0,
-            "Node is not created"
-        );
-        require(
-            !(user_nodes[_addr][_node_type].renewed + 1 > MAX_NEWED_COUNT), // Can not over MAX_NEWED_COUNT
+            !(user_node.renewed + 1 > MAX_NEWED_COUNT), // Can not over MAX_NEWED_COUNT
             "Can not renew any more"
         );
         require(
-            block.timestamp >
-                user_nodes[_addr][_node_type].created_time + expiration_period,
+            block.timestamp > user_node.created_time + expiration_period,
             "Node is not expired yet."
         );
 
-        //User will pay fee for renewal, same amount as deposit
+        //User will pay fee for renewal, same amount as create
+        uint256 renewal_fee = node_types[user_node.node_type].deposit_amount;
+        uint256 amount_to_treasury = renewal_fee.mul(treasury_allocation).div(
+            100
+        );
+        uint256 amount_to_contract = renewal_fee.safeSub(amount_to_treasury);
+        require(
+            iToken.transferFrom(_addr, address(this), amount_to_contract),
+            "token transfer failed"
+        );
         require(
             iToken.transferFrom(
                 _addr,
-                address(this),
-                node_types[_node_type].deposit_amount
+                address(treasury_address),
+                amount_to_treasury
             ),
             "token transfer failed"
         );
 
-        user_nodes[_addr][_node_type].created_time = block.timestamp;
-        user_nodes[_addr][_node_type].last_claim_time = block.timestamp;
-        user_nodes[_addr][_node_type].renewed++;
+        _renew(_addr, _timestamp);
 
-        emit Renew(_addr, _node_type);
+        return (renewal_fee, amount_to_treasury, amount_to_contract);
     }
 
-    // Calculate the current yield that use can claim
-    function getYieldCalculated(address _addr, uint256 _node_type)
+    function _renew(address _addr, uint256 _timestamp) private {
+        user_nodes[_addr][_timestamp].created_time = block.timestamp;
+        user_nodes[_addr][_timestamp].last_claim_time = block.timestamp;
+        user_nodes[_addr][_timestamp].renewed++;
+
+        emit Renew(_addr, _timestamp);
+    }
+
+    // Calculate the current yield calculated from last claim time
+    function getYieldCalculated(address _addr, uint256 _timestamp)
         public
         view
         returns (uint256 payout)
     {
-        uint256 node_daily_yield = getDailyYield(_addr, _node_type);
-        uint256 share = user_nodes[_addr][_node_type]
+        uint256 node_daily_yield = getDailyYield(_addr, _timestamp);
+        uint256 share = user_nodes[_addr][_timestamp]
             .deposits
             .mul(node_daily_yield)
             .div(1000)
@@ -423,12 +551,12 @@ contract Farming is Ownable {
         payout =
             share *
             block.timestamp.safeSub(
-                user_nodes[_addr][_node_type].last_claim_time
+                user_nodes[_addr][_timestamp].last_claim_time
             );
     }
 
     //Get the current year's daily yield of node
-    function getDailyYield(address _addr, uint256 _node_type)
+    function getDailyYield(address _addr, uint256 _timestamp)
         public
         view
         returns (uint256)
@@ -436,9 +564,10 @@ contract Farming is Ownable {
         /*
           current year's yield = daily yield * (increase ^ renewed count)
         */
-        uint256 a = node_types[_node_type].daily_yield;
-        uint256 b = node_types[_node_type].yield_increase_percent;
-        uint256 y = user_nodes[_addr][_node_type].renewed;
+        uint256 node_type = user_nodes[_addr][_timestamp].node_type;
+        uint256 a = node_types[node_type].daily_yield;
+        uint256 b = node_types[node_type].yield_increase_percent;
+        uint256 y = user_nodes[_addr][_timestamp].renewed;
 
         return a.mul(SafeMath.add(100, b)**y).div(100**y);
     }
@@ -447,51 +576,64 @@ contract Farming is Ownable {
     function getNodesCount(address _addr)
         public
         view
-        returns (uint256, bool[] memory)
+        returns (uint256 total_numbers, uint256[] memory number_of_each_type)
     {
-        uint256 count = 0;
-        bool[] memory status = new bool[](3);
-        for (uint256 i = 0; i < 3; i++) {
-            if (user_nodes[_addr][i].deposits > 0) {
-                count++;
-                status[i] = true;
-            } else status[i] = false;
+        number_of_each_type = new uint256[](3);
+        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
+            total_numbers++;
+            uint256 timestamp = user_nodes_timestamps[_addr][i];
+            uint256 node_type = user_nodes[_addr][timestamp].node_type;
+            number_of_each_type[node_type]++;
         }
-        return (count, status);
     }
 
-    //Get remaining time of taxed claim period
-    function getRemainingTimes(address _addr)
+    //Get remaining time of taxed claim period, result 0 means taxed period passed
+    function getRemainingTimes(address _addr, uint256 _timestamp)
         public
         view
-        returns (uint256[] memory)
+        returns (uint256 remaining_time)
     {
-        uint256[] memory remainings = new uint256[](3);
-        for (uint256 i = 0; i < 3; i++) {
-            remainings[i] = user_nodes[_addr][i]
-                .last_claim_time
-                .add(taxed_claim_period)
-                .safeSub(block.timestamp);
-        }
-        return (remainings);
+        remaining_time = user_nodes[_addr][_timestamp]
+            .last_claim_time
+            .add(taxed_claim_period)
+            .safeSub(block.timestamp);
     }
 
     //Get User's total deposit
-    function getUserDeposit(address _addr) public view returns (uint256) {
-        uint256 sum = 0;
-        for (uint256 i = 0; i < 3; i++) {
-            sum += user_nodes[_addr][i].deposits;
+    function getUserTotalDeposit(address _addr)
+        public
+        view
+        returns (uint256 sum)
+    {
+        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
+            uint256 timestamp = user_nodes_timestamps[_addr][i];
+            uint256 node_deposit = user_nodes[_addr][timestamp].deposits;
+            sum += node_deposit;
         }
-        return sum;
     }
 
     //Get User's total withdraw
-    function getUserWithdraw(address _addr) public view returns (uint256) {
-        uint256 sum = 0;
-        for (uint256 i = 0; i < 3; i++) {
-            sum += user_nodes[_addr][i].payouts;
+    function getUserTotalClaimed(address _addr)
+        public
+        view
+        returns (uint256 sum)
+    {
+        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
+            uint256 timestamp = user_nodes_timestamps[_addr][i];
+            uint256 node_payouts = user_nodes[_addr][timestamp].payouts;
+            sum += node_payouts;
         }
-        return sum;
+    }
+
+    //Check if user claimed
+    function checkUserClaimed(address _addr, uint256 _timestamp)
+        public
+        view
+        returns (bool)
+    {
+        return
+            user_nodes[_addr][_timestamp].last_claim_time >
+            user_nodes[_addr][_timestamp].created_time;
     }
 
     //Admin side function

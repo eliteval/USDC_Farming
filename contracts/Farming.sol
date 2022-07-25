@@ -254,8 +254,8 @@ contract Farming is Ownable {
             require(
                 iToken.transferFrom(
                     _addr,
-                    address(treasury_address),
-                    amount_to_treasury
+                    _upline,
+                    amount_to_referrer
                 ),
                 "token transfer failed"
             );

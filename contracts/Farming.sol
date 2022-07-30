@@ -155,6 +155,7 @@ contract Farming is Ownable {
 
     IToken private iToken;
 
+    address public stable_coin_address;
     address public treasury_address;
     address public tax_wallet;
     uint256 public treasury_allocation = 35; //35% of deposit will go to treasury
@@ -187,6 +188,7 @@ contract Farming is Ownable {
     event Renew(address indexed addr, uint256 timestamp);
 
     constructor() Ownable() {
+        stable_coin_address = POLYGON_USDC;
         iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
         //Initialize three nodes
         node_types[0] = NodeType("Starter", 100 * 1e18, 22, 12); //daily yield - 0.22%, APR- 80%, increase 12% every year
@@ -558,9 +560,10 @@ contract Farming is Ownable {
     {
         uint256 node_daily_yield = getDailyYield(_addr, _timestamp);
         uint256 share = user_nodes[_addr][_timestamp]
-        .deposits
-        .mul(node_daily_yield)
-        .div(10000).div(24 hours); // daily_yield unit is 0.01%
+            .deposits
+            .mul(node_daily_yield)
+            .div(10000)
+            .div(24 hours); // daily_yield unit is 0.01%
         payout =
             share *
             block.timestamp.safeSub(
@@ -660,6 +663,7 @@ contract Farming is Ownable {
 
     //Admin side function
     function setStablecoinAddress(address _tokenadd) public onlyOwner {
+        stable_coin_address = _tokenadd;
         iToken = IToken(_tokenadd);
     }
 

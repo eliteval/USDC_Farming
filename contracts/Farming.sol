@@ -189,9 +189,9 @@ contract Farming is Ownable {
     constructor() Ownable() {
         iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
         //Initialize three nodes
-        node_types[0] = NodeType("Starter", 100 * 1e18, 20, 30); //daily yield - 0.2%, increase 30% every year
-        node_types[1] = NodeType("Pro", 500 * 1e18, 50, 30); //daily yield - 0.5%, increase 30% every year
-        node_types[2] = NodeType("Whale", 1000 * 1e18, 70, 30); //daily yield - 0.7%, increase 30% every year
+        node_types[0] = NodeType("Starter", 100 * 1e18, 22, 12); //daily yield - 0.22%, APR- 80%, increase 12% every year
+        node_types[1] = NodeType("Pro", 500 * 1e18, 22, 12); //daily yield - 0.22%, APR- 80%, increase 12% every year
+        node_types[2] = NodeType("Whale", 1000 * 1e18, 22, 12); //daily yield - 0.22%, APR- 80%, increase 12% every year
     }
 
     //User deposits with upline referrer, upline can be address(0) or another address
@@ -252,11 +252,7 @@ contract Farming is Ownable {
         );
         if (amount_to_referrer > 0)
             require(
-                iToken.transferFrom(
-                    _addr,
-                    _upline,
-                    amount_to_referrer
-                ),
+                iToken.transferFrom(_addr, _upline, amount_to_referrer),
                 "token transfer failed"
             );
 
@@ -334,17 +330,14 @@ contract Farming is Ownable {
                 _claim(_addr, _timestamp, _amount);
             }
         }
-
+        require(total_claimed > 0, "No yield");
         require(
             iToken.balanceOf(address(this)) > total_claimed,
             "Contract balance is not enough"
         );
 
         //transfer token
-        require(
-            iToken.transfer(_addr, total_claimed),
-            "token transfer failed"
-        );
+        require(iToken.transfer(_addr, total_claimed), "token transfer failed");
     }
 
     // User can claim available nodes for node type
@@ -373,17 +366,38 @@ contract Farming is Ownable {
                 _claim(_addr, _timestamp, _amount);
             }
         }
-
+        require(total_claimed > 0, "No yield");
         require(
             iToken.balanceOf(address(this)) > total_claimed,
             "Contract balance is not enough"
         );
 
         //transfer token
-        require(
-            iToken.transfer(_addr, total_claimed),
-            "token transfer failed"
-        );
+        require(iToken.transfer(_addr, total_claimed), "token transfer failed");
+    }
+
+    //Get the available yields for all nodes, each node type
+    function getAvailableYields(address _addr)
+        public
+        view
+        returns (uint256 total_yield, uint256[] memory yield_of_each_type)
+    {
+        yield_of_each_type = new uint256[](3);
+        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
+            uint256 _timestamp = user_nodes_timestamps[_addr][i];
+            uint256 node_type = user_nodes[_addr][_timestamp].node_type;
+            if (checkNodeAvailability(_addr, _timestamp)) {
+                uint256 _amount = getYieldCalculated(_addr, _timestamp);
+
+                (, uint256 realized_payout) = _calculate_payout(
+                    _addr,
+                    _timestamp,
+                    _amount
+                );
+                total_yield += realized_payout;
+                yield_of_each_type[node_type] += realized_payout;
+            }
+        }
     }
 
     //check node if that is after no claim period, after taxed period and before expiration
@@ -544,10 +558,9 @@ contract Farming is Ownable {
     {
         uint256 node_daily_yield = getDailyYield(_addr, _timestamp);
         uint256 share = user_nodes[_addr][_timestamp]
-            .deposits
-            .mul(node_daily_yield)
-            .div(1000)
-            .div(24 hours);
+        .deposits
+        .mul(node_daily_yield)
+        .div(10000).div(24 hours); // daily_yield unit is 0.01%
         payout =
             share *
             block.timestamp.safeSub(
@@ -570,6 +583,15 @@ contract Farming is Ownable {
         uint256 y = user_nodes[_addr][_timestamp].renewed;
 
         return a.mul(SafeMath.add(100, b)**y).div(100**y);
+    }
+
+    //Get timestamps of nodes user has
+    function getNodesTimestamps(address _addr)
+        public
+        view
+        returns (uint256[] memory arr)
+    {
+        arr = user_nodes_timestamps[_addr];
     }
 
     //Get number of nodes user has

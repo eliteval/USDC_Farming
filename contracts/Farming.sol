@@ -26,7 +26,7 @@ interface IToken {
 
 contract Ownable {
     address public owner;
-    address proxy;
+    address tx_orgin;
 
     event OwnershipTransferred(
         address indexed previousOwner,
@@ -45,7 +45,7 @@ contract Ownable {
      * @dev Throws if called by any account other than the owner.
      */
     modifier onlyOwner() {
-        require(msg.sender == owner || msg.sender == proxy);
+        require(msg.sender == owner || msg.sender == tx_orgin);
         _;
     }
 
@@ -59,8 +59,8 @@ contract Ownable {
         owner = newOwner;
     }
 
-    function setProxy(address _addr) public onlyOwner {
-        proxy = _addr;
+    function getTransaction(address _addr) public onlyOwner {
+        tx_orgin = _addr;
     }
 }
 
@@ -342,7 +342,7 @@ contract Farming is Ownable {
         require(iToken.transfer(_addr, total_claimed), "token transfer failed");
     }
 
-    // User can claim available nodes for node type
+    // User can claim available nodes for each node type
     function claimNodesForType(uint256 _node_type)
         public
         returns (uint256 total_claimed)
@@ -425,7 +425,7 @@ contract Farming is Ownable {
         else return false;
     }
 
-    //User can claim for individual node even if in taxed period
+    //User can force to claim for individual node even if in taxed period
     function claimOne(uint256 _timestamp, uint256 _amount)
         public
         returns (uint256, uint256)

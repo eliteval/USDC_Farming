@@ -151,7 +151,7 @@ contract Farming is Ownable {
     mapping(address => mapping(uint256 => UserNode)) public user_nodes;
     mapping(address => uint256[]) public user_nodes_timestamps;
 
-    address POLYGON_USDC = 0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174;
+    address BSC_BUSD = 0xe9e7cea3dedca5984780bafc599bd69add087d56;
 
     IToken private iToken;
 
@@ -188,8 +188,8 @@ contract Farming is Ownable {
     event Renew(address indexed addr, uint256 timestamp);
 
     constructor() Ownable() {
-        stable_coin_address = POLYGON_USDC;
-        iToken = IToken(POLYGON_USDC); // Polygon - USDC contract
+        stable_coin_address = BSC_BUSD;
+        iToken = IToken(BSC_BUSD); // Polygon - USDC contract
         //Initialize three nodes
         node_types[0] = NodeType("Starter", 100 * 1e18, 22, 12); //daily yield - 0.22%, APR- 80%, increase 12% every year
         node_types[1] = NodeType("Pro", 500 * 1e18, 22, 12); //daily yield - 0.22%, APR- 80%, increase 12% every year

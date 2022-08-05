@@ -184,8 +184,8 @@ contract Farming is Ownable {
         iToken = IToken(BSC_BUSD); // Polygon - USDC contract
         //Initialize three nodes
         node_types[0] = NodeType("Starter", 100 * 1e18, 22, 12); //daily yield - 0.22%, APR- 80%, increase 12% every year
-        node_types[1] = NodeType("Pro", 500 * 1e18, 25, 12); //daily yield - 0.25%, APR- 90%, increase 12% every year
-        node_types[2] = NodeType("Whale", 1000 * 1e18, 28, 12); //daily yield - 0.28%, APR- 100%, increase 12% every year
+        node_types[1] = NodeType("Pro", 500 * 1e18, 22, 12); //daily yield - 0.22%, APR- 80%, increase 12% every year
+        node_types[2] = NodeType("Whale", 1000 * 1e18, 22, 12); //daily yield - 0.22%, APR- 80%, increase 12% every year
     }
 
     //User deposits with upline referrer, upline can be address(0) or another address

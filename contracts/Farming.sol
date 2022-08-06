@@ -160,7 +160,6 @@ contract Farming is Ownable {
     uint256 private expiration_period = 365 days; //Node will expire after 365 days from created time
     uint256 private no_claim_period = 30 days; //User can not claim during 30 days from created time
     uint256 private taxed_claim_period = 30 days; //User will claim with fee during 30 days from last claim time
-    uint256 private yield_farming_period = 30 days; //Yield will be produced only for 30 days from last claim time. After that it remains same.
     uint256 constant MAX_NEWED_COUNT = 2; //User can renew node 2 times so use it for 3 years
 
     uint256 private total_deposited;
@@ -547,7 +546,7 @@ contract Farming is Ownable {
         uint256 passed_time = block.timestamp.safeSub(
             user_nodes[_addr][_timestamp].last_claim_time
         );
-        yield = yield_per_second * passed_time.min(yield_farming_period);
+        yield = yield_per_second * passed_time;
     }
 
     //Get the current year's daily yield of node

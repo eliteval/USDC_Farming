@@ -742,7 +742,7 @@ contract Farming is Ownable {
         referral_fee = fee;
     }
 
-    function setCalimFee(uint256 fee) public onlyOwner {
+    function setClaimFee(uint256 fee) public onlyOwner {
         claim_fee = fee;
     }
 
